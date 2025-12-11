@@ -1,0 +1,84 @@
+# 编译输出
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+ruoyi-proxy
+ruoyi-proxy-linux
+ruoyi-proxy-windows
+ruoyi-proxy-darwin
+
+# 嵌入文件的副本（构建时自动生成）
+cmd/proxy/scripts/
+cmd/proxy/configs/
+
+# 测试文件
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go 相关
+vendor/
+go.work
+go.work.sum
+
+# 配置文件（运行时生成的配置）
+configs/proxy_config.json
+configs/sync_config.json
+configs/app_config.json
+
+# JAR 文件（部署的应用）
+*.jar
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 证书和密钥（安全相关）
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 压缩文件
+*.zip
+*.tar.gz
+*.rar
+

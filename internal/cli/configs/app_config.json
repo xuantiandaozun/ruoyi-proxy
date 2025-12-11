@@ -1,0 +1,21 @@
+{
+  "domain": "example.com",
+  "enable_https": false,
+  "proxy": {
+    "blue_target": "http://127.0.0.1:8080",
+    "green_target": "http://127.0.0.1:8081",
+    "active_env": "blue",
+    "proxy_port": "8000"
+  },
+  "ssl": {
+    "email": "your-email@example.com",
+    "cert_path": "/etc/nginx/cert",
+    "webroot_path": "/etc/nginx/html",
+    "log_file": "/var/log/cert-renewal.log"
+  },
+  "nginx": {
+    "config_path": "/etc/nginx/conf.d/ruoyi.conf",
+    "html_path": "/etc/nginx/html",
+    "vue_path": "/etc/nginx/html/admin"
+  }
+}

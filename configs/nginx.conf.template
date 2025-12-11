@@ -1,0 +1,67 @@
+# 若依蓝绿部署 - Nginx HTTP配置
+# 自动生成，请勿手动修改
+
+upstream ruoyi_backend {
+    server 127.0.0.1:{{PROXY_PORT}};
+    keepalive 32;
+}
+
+# HTTP服务器
+server {
+    listen 80;
+    server_name {{DOMAIN}};
+    
+    # 网站根目录
+    root {{HTML_PATH}};
+    index index.html;
+    
+    # 访问日志
+    access_log /var/log/nginx/ruoyi_access.log;
+    error_log /var/log/nginx/ruoyi_error.log;
+    
+    # Let's Encrypt验证
+    location /.well-known/acme-challenge/ {
+        root {{HTML_PATH}};
+    }
+    
+    # 直接访问测试文件
+    location /123.txt {
+        alias {{HTML_PATH}}/123.txt;
+    }
+    
+    # Vue前端 - 二级路由 /admin
+    location /admin {
+        alias {{VUE_PATH}};
+        try_files $uri $uri/ /admin/index.html;
+        
+        # 缓存配置
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+    
+    # API代理到Go程序
+    location /api/ {
+        proxy_pass http://ruoyi_backend/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # 支持WebSocket
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    
+    # 其他请求只访问静态文件
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

@@ -1,0 +1,92 @@
+# 若依蓝绿部署 - Nginx HTTPS配置
+# 自动生成，请勿手动修改
+
+upstream ruoyi_backend {
+    server 127.0.0.1:{{PROXY_PORT}};
+    keepalive 32;
+}
+
+# HTTP重定向到HTTPS
+server {
+    listen 80;
+    server_name {{DOMAIN}};
+    
+    # Let's Encrypt验证
+    location /.well-known/acme-challenge/ {
+        root {{HTML_PATH}};
+    }
+    
+    # 其他请求重定向到HTTPS
+    location / {
+        return 301 https://$server_name$request_uri;
+    }
+}
+
+# HTTPS服务器
+server {
+    listen 443 ssl http2;
+    server_name {{DOMAIN}};
+    
+    # SSL证书
+    ssl_certificate {{CERT_PATH}}/{{DOMAIN}}.pem;
+    ssl_certificate_key {{CERT_PATH}}/{{DOMAIN}}.key;
+    
+    # SSL配置
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # 网站根目录
+    root {{HTML_PATH}};
+    index index.html;
+    
+    # 访问日志
+    access_log /var/log/nginx/ruoyi_access.log;
+    error_log /var/log/nginx/ruoyi_error.log;
+    
+    # Vue前端 - 二级路由 /admin
+    location /admin {
+        alias {{VUE_PATH}};
+        try_files $uri $uri/ /admin/index.html;
+        
+        # 缓存配置
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+    
+    # API代理到Go程序
+    location /api/ {
+        proxy_pass http://ruoyi_backend/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # 支持WebSocket
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    
+    # 其他后端请求
+    location / {
+        try_files $uri $uri/ @backend;
+    }
+    
+    location @backend {
+        proxy_pass http://ruoyi_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
