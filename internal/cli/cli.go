@@ -1,16 +1,21 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/chzyer/readline"
+	"golang.org/x/term"
 )
 
 // CLI 交互式命令行界面
@@ -54,6 +59,12 @@ func (c *CLI) Start() {
 		readline.PcItem("config-edit"),
 		readline.PcItem("logs"),
 		readline.PcItem("logs-follow"),
+		readline.PcItem("logs-search", readline.PcItemDynamic(func(line string) []string {
+			return c.logBaseCompletionItems(line)
+		})),
+		readline.PcItem("logs-export", readline.PcItemDynamic(func(line string) []string {
+			return c.logBaseCompletionItems(line)
+		})),
 		readline.PcItem("init"),
 		readline.PcItem("cert"),
 		readline.PcItem("enable-https"),
@@ -164,6 +175,12 @@ func (c *CLI) printHelp() {
 	fmt.Println("    detail         - 查看详细状态")
 	fmt.Println("    logs [行数]    - 查看日志（默认300行）")
 	fmt.Println("    logs-follow    - 实时查看日志")
+	fmt.Println("    logs-search [日志名] [日期] [关键字] [行数] - 查询历史日志（日期可省略，默认今天）")
+	fmt.Println("    logs-export [日志名] [日期] [输出名] - 导出日志（日期可省略，默认今天）")
+	fmt.Println("    logs-search /    - 进入日志名选择器")
+	fmt.Println("    logs-export /    - 进入日志名选择器")
+	fmt.Println("    logs-search ?    - 列出日志名")
+	fmt.Println("    logs-export ?    - 列出日志名")
 	fmt.Println()
 	fmt.Println("  \033[1;33m环境管理:\033[0m")
 	fmt.Println("    init           - 完整初始化（环境安装+服务配置+启动）")
@@ -241,10 +258,48 @@ func (c *CLI) handleCommand(input string) {
 		if len(args) > 0 {
 			lines = args[0]
 		}
-		c.executeScript("service.sh", "logs", lines)
+		c.executeServiceLogCommand("logs", lines)
 
 	case "logs-follow":
-		c.executeScript("service.sh", "logs-follow")
+		c.executeServiceLogCommand("logs-follow")
+
+	case "logs-search":
+		if len(args) == 0 {
+			c.interactiveLogsSearch()
+			return
+		}
+		if c.isLogsSelectorHint(args[0]) {
+			c.interactiveLogsSearch()
+			return
+		}
+		if c.isLogsListHint(args[0]) {
+			c.printLogBaseList()
+			return
+		}
+		if len(args) == 1 && !c.isDateArg(args[0]) {
+			c.interactiveLogsSearchWithBase(args[0])
+			return
+		}
+		c.executeServiceLogCommand("logs-search", args...)
+
+	case "logs-export":
+		if len(args) == 0 {
+			c.interactiveLogsExport()
+			return
+		}
+		if c.isLogsSelectorHint(args[0]) {
+			c.interactiveLogsExport()
+			return
+		}
+		if c.isLogsListHint(args[0]) {
+			c.printLogBaseList()
+			return
+		}
+		if len(args) == 1 && !c.isDateArg(args[0]) {
+			c.interactiveLogsExportWithBase(args[0])
+			return
+		}
+		c.executeServiceLogCommand("logs-export", args...)
 
 	case "init":
 		c.handleInit()
@@ -1407,6 +1462,503 @@ func (c *CLI) executeServiceCommand(command string) {
 	}
 
 	fmt.Println(strings.Repeat("─", 60))
+}
+
+// executeServiceLogCommand 执行日志相关命令（优先使用当前服务配置，失败则回退默认）
+func (c *CLI) executeServiceLogCommand(command string, args ...string) {
+	// 尝试获取当前服务配置
+	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
+	output, err := cmd.Output()
+	if err != nil {
+		c.printWarning("无法获取服务配置，回退为默认日志")
+		c.executeScript(append([]string{"service.sh", command}, args...)...)
+		return
+	}
+
+	var status map[string]interface{}
+	if err := json.Unmarshal(output, &status); err != nil {
+		c.printWarning("解析服务配置失败，回退为默认日志")
+		c.executeScript(append([]string{"service.sh", command}, args...)...)
+		return
+	}
+
+	services, ok := status["services"].([]interface{})
+	if !ok {
+		c.printWarning("服务配置格式异常，回退为默认日志")
+		c.executeScript(append([]string{"service.sh", command}, args...)...)
+		return
+	}
+
+	// 查找当前服务
+	var currentSvc map[string]interface{}
+	for _, s := range services {
+		svc, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if id, ok := svc["id"].(string); ok && id == c.currentService {
+			currentSvc = svc
+			break
+		}
+	}
+
+	if currentSvc == nil {
+		c.printError(fmt.Sprintf("未找到当前服务[%s]的配置", c.currentService))
+		c.printInfo("提示：使用 service-list 查看所有服务")
+		return
+	}
+
+	// 提取服务配置
+	jarFile, _ := currentSvc["jar_file"].(string)
+	appName, _ := currentSvc["app_name"].(string)
+	blueTarget, _ := currentSvc["blue_target"].(string)
+	greenTarget, _ := currentSvc["green_target"].(string)
+
+	bluePort := extractPort(blueTarget)
+	greenPort := extractPort(greenTarget)
+
+	if jarFile == "" {
+		jarFile = "ruoyi-*.jar"
+	}
+	if appName == "" {
+		appName = "ruoyi"
+	}
+	if bluePort == "" {
+		bluePort = "8080"
+	}
+	if greenPort == "" {
+		greenPort = "8081"
+	}
+
+	serviceName := currentSvc["name"].(string)
+	c.printInfo(fmt.Sprintf("查看服务日志: %s (%s)", serviceName, c.currentService))
+
+	scriptPath := c.findScript("service.sh")
+	if scriptPath == "" {
+		c.printError("未找到脚本: service.sh")
+		return
+	}
+
+	c.printInfo(fmt.Sprintf("执行: SERVICE_ID=%s APP_NAME=%s JAR=%s BLUE=%s GREEN=%s %s %s %s",
+		c.currentService, appName, jarFile, bluePort, greenPort, scriptPath, command, strings.Join(args, " ")))
+	fmt.Println(strings.Repeat("─", 60))
+
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("SERVICE_ID=%s", c.currentService))
+	env = append(env, fmt.Sprintf("APP_NAME=%s", appName))
+	env = append(env, fmt.Sprintf("APP_JAR_PATTERN=%s", jarFile))
+	env = append(env, fmt.Sprintf("BLUE_PORT=%s", bluePort))
+	env = append(env, fmt.Sprintf("GREEN_PORT=%s", greenPort))
+
+	cmdArgs := append([]string{scriptPath, command}, args...)
+	execCmd := exec.Command("bash", cmdArgs...)
+	execCmd.Env = env
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+	execCmd.Stdin = os.Stdin
+
+	if err := execCmd.Run(); err != nil {
+		c.printError(fmt.Sprintf("执行失败: %v", err))
+	}
+
+	fmt.Println(strings.Repeat("─", 60))
+}
+
+// isLogsListHint 判断是否为日志名列表提示
+func (c *CLI) isLogsListHint(arg string) bool {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "?", "list", "-l", "--list":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLogsSelectorHint 判断是否为选择器提示
+func (c *CLI) isLogsSelectorHint(arg string) bool {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "/", "select", "--select":
+		return true
+	default:
+		return false
+	}
+}
+
+// isDateArg 判断是否为 YYYY-MM-DD 格式日期
+func (c *CLI) isDateArg(arg string) bool {
+	if strings.TrimSpace(arg) == "" {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", strings.TrimSpace(arg))
+	return err == nil
+}
+
+// getAppHome 获取应用根目录（scripts 的父目录）
+func (c *CLI) getAppHome() (string, error) {
+	scriptPath := c.findScript("service.sh")
+	if scriptPath == "" {
+		return "", fmt.Errorf("未找到脚本: service.sh")
+	}
+	absPath, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return "", err
+	}
+	scriptsDir := filepath.Dir(absPath)
+	return filepath.Dir(scriptsDir), nil
+}
+
+// listLogBases 获取 logs 目录下可用的日志名（去重、排序）
+func (c *CLI) listLogBases() ([]string, error) {
+	appHome, err := c.getAppHome()
+	if err != nil {
+		return nil, err
+	}
+	logsDir := filepath.Join(appHome, "logs")
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	baseSet := make(map[string]struct{})
+	re := regexp.MustCompile(`^(.+?)(?:[._-]\d{4}-\d{2}-\d{2})?\.log$`)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		matches := re.FindStringSubmatch(name)
+		if len(matches) == 2 {
+			base := matches[1]
+			if base != "" {
+				baseSet[base] = struct{}{}
+			}
+		}
+	}
+
+	if len(baseSet) == 0 {
+		return []string{}, nil
+	}
+
+	bases := make([]string, 0, len(baseSet))
+	for b := range baseSet {
+		bases = append(bases, b)
+	}
+	sort.Strings(bases)
+	return bases, nil
+}
+
+// logBaseCompletionItems 自动补全日志名（用于 readline）
+func (c *CLI) logBaseCompletionItems(_ string) []string {
+	bases, err := c.listLogBases()
+	if err != nil {
+		return []string{}
+	}
+	return bases
+}
+
+// printLogBaseList 打印日志名列表
+func (c *CLI) printLogBaseList() {
+	bases, err := c.listLogBases()
+	if err != nil {
+		c.printError(fmt.Sprintf("读取日志名失败: %v", err))
+		return
+	}
+	if len(bases) == 0 {
+		c.printWarning("logs 目录下未找到日志文件")
+		return
+	}
+	fmt.Println("\n\033[1;33m可用日志名:\033[0m")
+	fmt.Println(strings.Repeat("─", 60))
+	for i, b := range bases {
+		fmt.Printf("  %d. %s\n", i+1, b)
+	}
+	fmt.Println(strings.Repeat("─", 60))
+}
+
+// selectLogBase 交互选择日志名
+func (c *CLI) selectLogBase() (string, bool) {
+	bases, err := c.listLogBases()
+	if err != nil {
+		c.printError(fmt.Sprintf("读取日志名失败: %v", err))
+		return "", false
+	}
+	if len(bases) == 0 {
+		c.printWarning("logs 目录下未找到日志文件")
+		return "", false
+	}
+
+	fmt.Println("\n\033[1;33m可用日志名:\033[0m")
+	fmt.Println(strings.Repeat("─", 60))
+	for i, b := range bases {
+		fmt.Printf("  %d. %s\n", i+1, b)
+	}
+	fmt.Println(strings.Repeat("─", 60))
+
+	choice, err := c.readLineWithPrompt("\033[1;33m选择日志名 (输入编号或名称，回车取消): \033[0m")
+	if err != nil || strings.TrimSpace(choice) == "" {
+		c.printInfo("已取消")
+		return "", false
+	}
+
+	choice = strings.TrimSpace(choice)
+	var index int
+	if n, err := fmt.Sscanf(choice, "%d", &index); err == nil && n == 1 && index > 0 && index <= len(bases) {
+		return bases[index-1], true
+	}
+
+	for _, b := range bases {
+		if b == choice {
+			return choice, true
+		}
+	}
+
+	c.printError(fmt.Sprintf("日志名[%s]不存在", choice))
+	return "", false
+}
+
+// selectLogBaseMenu 交互式选择器（支持方向键，若不可用则回退为编号选择）
+func (c *CLI) selectLogBaseMenu() (string, bool) {
+	bases, err := c.listLogBases()
+	if err != nil {
+		c.printError(fmt.Sprintf("读取日志名失败: %v", err))
+		return "", false
+	}
+	if len(bases) == 0 {
+		c.printWarning("logs 目录下未找到日志文件")
+		return "", false
+	}
+
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return c.selectLogBase()
+	}
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return c.selectLogBase()
+	}
+	defer term.Restore(fd, oldState)
+
+	hideCursor := func() { fmt.Print("\033[?25l") }
+	showCursor := func() { fmt.Print("\033[?25h") }
+	hideCursor()
+	defer showCursor()
+
+	width, height, err := term.GetSize(fd)
+	_ = width
+	if err != nil || height < 8 {
+		height = 12
+	}
+	maxVisible := height - 4
+	if maxVisible < 5 {
+		maxVisible = 5
+	}
+
+	selected := 0
+	start := 0
+	renderedLines := 0
+	reader := bufio.NewReader(os.Stdin)
+
+	render := func() {
+		if renderedLines > 0 {
+			fmt.Printf("\033[%dA", renderedLines)
+			fmt.Print("\r\033[0J")
+		}
+
+		fmt.Print("\r\033[1;33m可用日志名（↑/↓ 或 j/k 选择，Enter 确认，Esc 取消）:\033[0m\r\n")
+		renderedLines = 1
+
+		if selected < start {
+			start = selected
+		} else if selected >= start+maxVisible {
+			start = selected - maxVisible + 1
+		}
+
+		end := start + maxVisible
+		if end > len(bases) {
+			end = len(bases)
+		}
+
+		for i := start; i < end; i++ {
+			prefix := "  "
+			line := bases[i]
+			if i == selected {
+				prefix = "\033[1;32m> \033[0m"
+				line = "\033[1;32m" + line + "\033[0m"
+			}
+			fmt.Printf("\r%s%s\r\n", prefix, line)
+			renderedLines++
+		}
+	}
+
+	readKey := func() rune {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0
+		}
+		if b == 0x1b {
+			next, _ := reader.ReadByte()
+			if next == '[' {
+				third, _ := reader.ReadByte()
+				switch third {
+				case 'A':
+					return 'U' // up
+				case 'B':
+					return 'D' // down
+				}
+			}
+			return 0x1b
+		}
+		return rune(b)
+	}
+
+	render()
+	for {
+		k := readKey()
+		switch k {
+		case 'U', 'k', 'K':
+			if selected > 0 {
+				selected--
+				render()
+			}
+		case 'D', 'j', 'J':
+			if selected < len(bases)-1 {
+				selected++
+				render()
+			}
+		case '\r', '\n':
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			return bases[selected], true
+		case 0x1b, 3:
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			c.printInfo("已取消")
+			return "", false
+		}
+	}
+}
+
+// interactiveLogsSearch 交互式日志查询
+func (c *CLI) interactiveLogsSearch() {
+	base, ok := c.selectLogBaseMenu()
+	if !ok {
+		return
+	}
+
+	date, err := c.readLineWithPrompt("\033[1;33m请输入日期 (YYYY-MM-DD，回车默认今天): \033[0m")
+	if err != nil {
+		return
+	}
+	date = strings.TrimSpace(date)
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+		c.printInfo(fmt.Sprintf("使用默认日期: %s", date))
+	}
+
+	keyword, _ := c.readLineWithPrompt("\033[1;33m请输入关键字 (可选，回车跳过): \033[0m")
+	limit, _ := c.readLineWithPrompt("\033[1;33m请输入行数 (可选，默认200): \033[0m")
+
+	args := []string{base, strings.TrimSpace(date)}
+	if strings.TrimSpace(keyword) != "" {
+		args = append(args, strings.TrimSpace(keyword))
+	}
+	if strings.TrimSpace(limit) != "" {
+		args = append(args, strings.TrimSpace(limit))
+	}
+
+	c.executeServiceLogCommand("logs-search", args...)
+}
+
+// interactiveLogsSearchWithBase 交互式日志查询（指定日志名）
+func (c *CLI) interactiveLogsSearchWithBase(base string) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		c.printError("日志名不能为空")
+		return
+	}
+
+	date, err := c.readLineWithPrompt("\033[1;33m请输入日期 (YYYY-MM-DD，回车默认今天): \033[0m")
+	if err != nil {
+		return
+	}
+	date = strings.TrimSpace(date)
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+		c.printInfo(fmt.Sprintf("使用默认日期: %s", date))
+	}
+
+	keyword, _ := c.readLineWithPrompt("\033[1;33m请输入关键字 (可选，回车跳过): \033[0m")
+	limit, _ := c.readLineWithPrompt("\033[1;33m请输入行数 (可选，默认200): \033[0m")
+
+	args := []string{base, date}
+	if strings.TrimSpace(keyword) != "" {
+		args = append(args, strings.TrimSpace(keyword))
+	}
+	if strings.TrimSpace(limit) != "" {
+		args = append(args, strings.TrimSpace(limit))
+	}
+
+	c.executeServiceLogCommand("logs-search", args...)
+}
+
+// interactiveLogsExport 交互式日志导出
+func (c *CLI) interactiveLogsExport() {
+	base, ok := c.selectLogBaseMenu()
+	if !ok {
+		return
+	}
+
+	date, err := c.readLineWithPrompt("\033[1;33m请输入日期 (YYYY-MM-DD，回车默认今天): \033[0m")
+	if err != nil {
+		return
+	}
+	date = strings.TrimSpace(date)
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+		c.printInfo(fmt.Sprintf("使用默认日期: %s", date))
+	}
+
+	output, _ := c.readLineWithPrompt("\033[1;33m输出文件名 (可选，回车使用默认): \033[0m")
+
+	args := []string{base, strings.TrimSpace(date)}
+	if strings.TrimSpace(output) != "" {
+		args = append(args, strings.TrimSpace(output))
+	}
+
+	c.executeServiceLogCommand("logs-export", args...)
+}
+
+// interactiveLogsExportWithBase 交互式日志导出（指定日志名）
+func (c *CLI) interactiveLogsExportWithBase(base string) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		c.printError("日志名不能为空")
+		return
+	}
+
+	date, err := c.readLineWithPrompt("\033[1;33m请输入日期 (YYYY-MM-DD，回车默认今天): \033[0m")
+	if err != nil {
+		return
+	}
+	date = strings.TrimSpace(date)
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+		c.printInfo(fmt.Sprintf("使用默认日期: %s", date))
+	}
+
+	output, _ := c.readLineWithPrompt("\033[1;33m输出文件名 (可选，回车使用默认): \033[0m")
+
+	args := []string{base, date}
+	if strings.TrimSpace(output) != "" {
+		args = append(args, strings.TrimSpace(output))
+	}
+
+	c.executeServiceLogCommand("logs-export", args...)
 }
 
 // extractPort 从URL中提取端口号

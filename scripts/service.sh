@@ -29,8 +29,8 @@ STARTUP_TIMEOUT=30
 
 # JVM参数配置
 BASE_JVM_OPTS="-server \
--Xms256m \
--Xmx800m \
+-Xms1g \
+-Xmx3g \
 -XX:+UseG1GC \
 -XX:MaxGCPauseMillis=200 \
 -XX:+UseStringDeduplication \
@@ -902,6 +902,240 @@ logs_follow() {
     fi
 }
 
+# 按日期查询历史日志并可搜索关键字
+resolve_logfile_by_date() {
+    local base="$1"
+    local date="$2"
+    local log_dir="$APP_HOME/logs"
+
+    if [ -z "$base" ]; then
+        base="$APP_NAME"
+    fi
+    base="${base%.log}"
+
+    local logfile=""
+    local candidates=(
+        "$log_dir/$base.$date.log"
+        "$log_dir/$base-$date.log"
+        "$log_dir/$base_$date.log"
+    )
+
+    for f in "${candidates[@]}"; do
+        if [ -f "$f" ]; then
+            logfile="$f"
+            break
+        fi
+    done
+
+    # 兼容不规则命名
+    if [ -z "$logfile" ]; then
+        local glob_files=("$log_dir/$base"*"$date"*.log)
+        if [ -f "${glob_files[0]}" ]; then
+            logfile="${glob_files[0]}"
+        fi
+    fi
+
+    # 若日期为今天，尝试使用当前日志
+    if [ -z "$logfile" ]; then
+        if [ "$(date +%F 2>/dev/null)" = "$date" ] && [ -f "$log_dir/$base.log" ]; then
+            logfile="$log_dir/$base.log"
+        fi
+    fi
+
+    # 兼容不带日期的日志文件
+    if [ -z "$logfile" ] && [ -f "$log_dir/$base.log" ]; then
+        logfile="$log_dir/$base.log"
+    fi
+
+    if [ -z "$logfile" ]; then
+        return 1
+    fi
+
+    echo "$logfile"
+}
+
+logs_search() {
+    local arg1="$1"
+    local arg2="$2"
+    local arg3="$3"
+    local arg4="$4"
+
+    local base=""
+    local date=""
+    local keyword=""
+    local limit=""
+    local today=""
+    if command -v date >/dev/null 2>&1; then
+        today="$(date +%F 2>/dev/null)"
+    fi
+    local example_date="${today}"
+    if [ -z "$example_date" ]; then
+        example_date="YYYY-MM-DD"
+    fi
+
+    if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        date="$arg1"
+        keyword="$arg2"
+        limit="${arg3:-200}"
+        base="$APP_NAME"
+    else
+        base="$arg1"
+        date="$arg2"
+        keyword="$arg3"
+        limit="${arg4:-200}"
+    fi
+
+    if [ -z "$base" ]; then
+        base="$APP_NAME"
+    fi
+
+    if [ -z "$date" ]; then
+        if [ -n "$today" ]; then
+            date="$today"
+            echo -e "${YELLOW}未输入日期，默认使用今天: $date${NC}"
+        else
+            echo -e "${RED}用法: logs-search [日志名] [日期] [关键字] [行数]${NC}"
+            echo -e "${YELLOW}示例: logs-search $example_date ERROR 200${NC}"
+            echo -e "${YELLOW}示例: logs-search sys-info $example_date ERROR 200${NC}"
+            return 1
+        fi
+    fi
+
+    local logfile=$(resolve_logfile_by_date "$base" "$date")
+    if [ -z "$logfile" ]; then
+        echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        return 1
+    fi
+
+    if [ -z "$keyword" ]; then
+        echo -e "${BLUE}查看 $date 日志 (文件: $logfile, 最后 $limit 行):${NC}"
+        tail -n "$limit" "$logfile"
+        return 0
+    fi
+
+    echo -e "${BLUE}搜索 $date 日志 (文件: $logfile, 关键字: $keyword, 最多 $limit 行匹配):${NC}"
+    local result=""
+    if command -v rg >/dev/null 2>&1; then
+        result=$(rg --no-heading -n "$keyword" "$logfile" | tail -n "$limit")
+    else
+        result=$(grep -n "$keyword" "$logfile" | tail -n "$limit")
+    fi
+
+    if [ -z "$result" ]; then
+        echo -e "${YELLOW}未找到匹配关键字的日志: $keyword${NC}"
+        return 1
+    fi
+
+    echo "$result"
+}
+
+# 导出日志文件（优先压缩，无法压缩则直接复制）
+logs_export() {
+    local arg1="$1"
+    local arg2="$2"
+    local arg3="$3"
+
+    local base=""
+    local date=""
+    local output=""
+    local today=""
+    if command -v date >/dev/null 2>&1; then
+        today="$(date +%F 2>/dev/null)"
+    fi
+    local example_date="${today}"
+    if [ -z "$example_date" ]; then
+        example_date="YYYY-MM-DD"
+    fi
+
+    if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        date="$arg1"
+        output="$arg2"
+        base="$APP_NAME"
+    else
+        base="$arg1"
+        date="$arg2"
+        output="$arg3"
+    fi
+
+    if [ -z "$base" ]; then
+        base="$APP_NAME"
+    fi
+
+    if [ -z "$date" ]; then
+        if [ -n "$today" ]; then
+            date="$today"
+            echo -e "${YELLOW}未输入日期，默认使用今天: $date${NC}"
+        else
+            echo -e "${RED}用法: logs-export [日志名] [日期] [输出名]${NC}"
+            echo -e "${YELLOW}示例: logs-export $example_date${NC}"
+            echo -e "${YELLOW}示例: logs-export sys-info $example_date mylog.tar.gz${NC}"
+            return 1
+        fi
+    fi
+
+    local logfile=$(resolve_logfile_by_date "$base" "$date")
+    if [ -z "$logfile" ]; then
+        echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        return 1
+    fi
+
+    local export_dir="$APP_HOME/logs/exports"
+    mkdir -p "$export_dir"
+
+    local base_name="${base:-$APP_NAME}"
+    base_name="${base_name%.log}"
+    local out_name=""
+    if [ -n "$output" ]; then
+        out_name="$(basename "$output")"
+    else
+        out_name="${base_name}.${date}"
+    fi
+
+    local out_path=""
+    if command -v tar >/dev/null 2>&1; then
+        if [[ "$out_name" != *.tar.gz && "$out_name" != *.tgz ]]; then
+            out_name="${out_name}.tar.gz"
+        fi
+        out_path="$export_dir/$out_name"
+        tar -czf "$out_path" -C "$(dirname "$logfile")" "$(basename "$logfile")"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}压缩失败，尝试直接复制...${NC}"
+            out_name="${base_name}.${date}.log"
+            out_path="$export_dir/$out_name"
+            cp "$logfile" "$out_path"
+        fi
+    elif command -v gzip >/dev/null 2>&1; then
+        if [[ "$out_name" != *.gz ]]; then
+            out_name="${out_name}.gz"
+        fi
+        out_path="$export_dir/$out_name"
+        gzip -c "$logfile" > "$out_path"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}压缩失败，尝试直接复制...${NC}"
+            out_name="${base_name}.${date}.log"
+            out_path="$export_dir/$out_name"
+            cp "$logfile" "$out_path"
+        fi
+    else
+        out_name="${out_name%.tar.gz}"
+        out_name="${out_name%.tgz}"
+        out_name="${out_name%.gz}"
+        if [[ "$out_name" != *.log ]]; then
+            out_name="${out_name}.log"
+        fi
+        out_path="$export_dir/$out_name"
+        cp "$logfile" "$out_path"
+    fi
+
+    if [ -f "$out_path" ]; then
+        echo -e "${GREEN}导出成功: $out_path${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}导出失败${NC}"
+    return 1
+}
+
 # 清理所有相关的java进程（紧急情况使用）
 cleanup() {
     local jar_files=($(find "$APP_HOME" -maxdepth 1 -name "$APP_JAR_PATTERN" -type f 2>/dev/null | sort -V))
@@ -935,6 +1169,8 @@ help() {
     echo "  status         - 查看状态"
     echo "  logs [行数]    - 查看日志"
     echo "  logs-follow    - 实时日志"
+    echo "  logs-search [日志名] [日期] [关键字] [行数] - 查询历史日志（日期可省略，默认今天）"
+    echo "  logs-export [日志名] [日期] [输出名] - 导出日志（日期可省略，默认今天）"
     echo "  force-cleanup  - 强制清理所有进程"
     echo "  help           - 显示帮助"
     echo ""
@@ -970,6 +1206,12 @@ case "$1" in
         ;;
     logs-follow)
         logs_follow
+        ;;
+    logs-search)
+        logs_search "$2" "$3" "$4"
+        ;;
+    logs-export)
+        logs_export "$2" "$3" "$4"
         ;;
     force-cleanup)
         force_cleanup
