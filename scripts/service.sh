@@ -877,7 +877,7 @@ status() {
 
 # 查看日志
 logs() {
-    local lines=${1:-300}
+    local lines=${1:-600}
     local active_env=$(get_active_env)
     local logfile="$APP_HOME/logs/$APP_NAME-${active_env}.log"
     
@@ -954,6 +954,45 @@ resolve_logfile_by_date() {
     echo "$logfile"
 }
 
+# 按日志名查找最新日志文件（基于修改时间）
+resolve_logfile_latest() {
+    local base="$1"
+    local log_dir="$APP_HOME/logs"
+
+    if [ -z "$base" ]; then
+        base="$APP_NAME"
+    fi
+    base="${base%.log}"
+
+    if [ -f "$log_dir/$base.log" ]; then
+        echo "$log_dir/$base.log"
+        return 0
+    fi
+    if [ -f "$log_dir/$base" ]; then
+        echo "$log_dir/$base"
+        return 0
+    fi
+
+    local candidates=("$log_dir/$base"*.log)
+    if [ -f "${candidates[0]}" ]; then
+        local newest=""
+        local f=""
+        for f in "${candidates[@]}"; do
+            if [ -f "$f" ]; then
+                if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                    newest="$f"
+                fi
+            fi
+        done
+        if [ -n "$newest" ]; then
+            echo "$newest"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 logs_search() {
     local arg1="$1"
     local arg2="$2"
@@ -964,56 +1003,70 @@ logs_search() {
     local date=""
     local keyword=""
     local limit=""
-    local today=""
-    if command -v date >/dev/null 2>&1; then
-        today="$(date +%F 2>/dev/null)"
-    fi
-    local example_date="${today}"
-    if [ -z "$example_date" ]; then
-        example_date="YYYY-MM-DD"
-    fi
+    local logfile=""
 
-    if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        date="$arg1"
-        keyword="$arg2"
-        limit="${arg3:-200}"
-        base="$APP_NAME"
-    else
-        base="$arg1"
-        date="$arg2"
-        keyword="$arg3"
-        limit="${arg4:-200}"
-    fi
-
-    if [ -z "$base" ]; then
-        base="$APP_NAME"
-    fi
-
-    if [ -z "$date" ]; then
-        if [ -n "$today" ]; then
-            date="$today"
-            echo -e "${YELLOW}未输入日期，默认使用今天: $date${NC}"
-        else
-            echo -e "${RED}用法: logs-search [日志名] [日期] [关键字] [行数]${NC}"
-            echo -e "${YELLOW}示例: logs-search $example_date ERROR 200${NC}"
-            echo -e "${YELLOW}示例: logs-search sys-info $example_date ERROR 200${NC}"
-            return 1
+    # 直接传入日志文件路径或文件名
+    if [ -n "$arg1" ]; then
+        if [ -f "$arg1" ]; then
+            logfile="$arg1"
+            keyword="$arg2"
+            limit="${arg3:-600}"
+        elif [ -f "$APP_HOME/logs/$arg1" ]; then
+            logfile="$APP_HOME/logs/$arg1"
+            keyword="$arg2"
+            limit="${arg3:-600}"
         fi
     fi
 
-    local logfile=$(resolve_logfile_by_date "$base" "$date")
     if [ -z "$logfile" ]; then
-        echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            date="$arg1"
+            keyword="$arg2"
+            limit="${arg3:-600}"
+            base="$APP_NAME"
+        else
+            base="$arg1"
+            if [[ "$arg2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                date="$arg2"
+                keyword="$arg3"
+                limit="${arg4:-600}"
+            else
+                keyword="$arg2"
+                limit="${arg3:-600}"
+            fi
+        fi
+
+        if [ -z "$base" ]; then
+            base="$APP_NAME"
+        fi
+
+        if [ -n "$date" ]; then
+            logfile=$(resolve_logfile_by_date "$base" "$date")
+        else
+            logfile=$(resolve_logfile_latest "$base")
+        fi
+    fi
+
+    if [ -z "$logfile" ]; then
+        if [ -n "$date" ]; then
+            echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        else
+            echo -e "${RED}未找到日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        fi
         return 1
     fi
 
+    if [ -z "$limit" ]; then
+        limit=600
+    fi
+
     if [ -z "$keyword" ]; then
-        echo -e "${BLUE}查看 $date 日志 (文件: $logfile, 最后 $limit 行):${NC}"
+        echo -e "${BLUE}查看日志 (文件: $logfile, 最后 $limit 行):${NC}"
         tail -n "$limit" "$logfile"
         return 0
     fi
 
-    echo -e "${BLUE}搜索 $date 日志 (文件: $logfile, 关键字: $keyword, 最多 $limit 行匹配):${NC}"
+    echo -e "${BLUE}搜索日志 (文件: $logfile, 关键字: $keyword, 最多 $limit 行匹配):${NC}"
     local result=""
     if command -v rg >/dev/null 2>&1; then
         result=$(rg --no-heading -n "$keyword" "$logfile" | tail -n "$limit")
@@ -1038,57 +1091,72 @@ logs_export() {
     local base=""
     local date=""
     local output=""
-    local today=""
-    if command -v date >/dev/null 2>&1; then
-        today="$(date +%F 2>/dev/null)"
-    fi
-    local example_date="${today}"
-    if [ -z "$example_date" ]; then
-        example_date="YYYY-MM-DD"
-    fi
+    local logfile=""
 
-    if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        date="$arg1"
-        output="$arg2"
-        base="$APP_NAME"
-    else
-        base="$arg1"
-        date="$arg2"
-        output="$arg3"
-    fi
-
-    if [ -z "$base" ]; then
-        base="$APP_NAME"
-    fi
-
-    if [ -z "$date" ]; then
-        if [ -n "$today" ]; then
-            date="$today"
-            echo -e "${YELLOW}未输入日期，默认使用今天: $date${NC}"
-        else
-            echo -e "${RED}用法: logs-export [日志名] [日期] [输出名]${NC}"
-            echo -e "${YELLOW}示例: logs-export $example_date${NC}"
-            echo -e "${YELLOW}示例: logs-export sys-info $example_date mylog.tar.gz${NC}"
-            return 1
+    # 直接传入日志文件路径或文件名
+    if [ -n "$arg1" ]; then
+        if [ -f "$arg1" ]; then
+            logfile="$arg1"
+            output="$arg2"
+        elif [ -f "$APP_HOME/logs/$arg1" ]; then
+            logfile="$APP_HOME/logs/$arg1"
+            output="$arg2"
         fi
     fi
 
-    local logfile=$(resolve_logfile_by_date "$base" "$date")
     if [ -z "$logfile" ]; then
-        echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        if [[ "$arg1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            date="$arg1"
+            output="$arg2"
+            base="$APP_NAME"
+        else
+            base="$arg1"
+            if [[ "$arg2" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                date="$arg2"
+                output="$arg3"
+            else
+                output="$arg2"
+            fi
+        fi
+
+        if [ -z "$base" ]; then
+            base="$APP_NAME"
+        fi
+
+        if [ -n "$date" ]; then
+            logfile=$(resolve_logfile_by_date "$base" "$date")
+        else
+            logfile=$(resolve_logfile_latest "$base")
+        fi
+    fi
+
+    if [ -z "$logfile" ]; then
+        if [ -n "$date" ]; then
+            echo -e "${RED}未找到日期 $date 的日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        else
+            echo -e "${RED}未找到日志文件 (日志名=${base:-$APP_NAME}, 目录=$APP_HOME/logs)${NC}"
+        fi
         return 1
     fi
 
     local export_dir="$APP_HOME/logs/exports"
     mkdir -p "$export_dir"
 
-    local base_name="${base:-$APP_NAME}"
+    local base_name="$(basename "$logfile")"
     base_name="${base_name%.log}"
     local out_name=""
     if [ -n "$output" ]; then
         out_name="$(basename "$output")"
     else
-        out_name="${base_name}.${date}"
+        if [ -n "$date" ]; then
+            if [[ "$base_name" == *"$date"* ]]; then
+                out_name="${base_name}"
+            else
+                out_name="${base_name}.${date}"
+            fi
+        else
+            out_name="${base_name}"
+        fi
     fi
 
     local out_path=""
@@ -1167,10 +1235,10 @@ help() {
     echo "  restart        - 重启服务"
     echo "  deploy         - 蓝绿部署新版本"
     echo "  status         - 查看状态"
-    echo "  logs [行数]    - 查看日志"
+    echo "  logs [行数]    - 查看日志（默认600行）"
     echo "  logs-follow    - 实时日志"
-    echo "  logs-search [日志名] [日期] [关键字] [行数] - 查询历史日志（日期可省略，默认今天）"
-    echo "  logs-export [日志名] [日期] [输出名] - 导出日志（日期可省略，默认今天）"
+    echo "  logs-search [日志名/日志文件] [关键字] [行数] - 查询历史日志（行数默认600）"
+    echo "  logs-export [日志名/日志文件] [输出名] - 导出日志"
     echo "  force-cleanup  - 强制清理所有进程"
     echo "  help           - 显示帮助"
     echo ""
