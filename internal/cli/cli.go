@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/chzyer/readline"
 	"golang.org/x/term"
+
+	"ruoyi-proxy/internal/config"
 )
 
 // CLI 交互式命令行界面
@@ -70,6 +73,7 @@ func (c *CLI) Start() {
 		readline.PcItem("disable-https"),
 		readline.PcItem("proxy-start"),
 		readline.PcItem("proxy-stop"),
+		readline.PcItem("proxy-restart"),
 		readline.PcItem("proxy-status"),
 		readline.PcItem("switch"),
 		readline.PcItem("detail"),
@@ -186,6 +190,7 @@ func (c *CLI) printHelp() {
 	fmt.Println("  \033[1;33m代理管理:\033[0m")
 	fmt.Println("    proxy-start    - 启动代理服务")
 	fmt.Println("    proxy-stop     - 停止代理服务")
+	fmt.Println("    proxy-restart  - 重启代理服务")
 	fmt.Println("    proxy-status   - 查看代理状态")
 	fmt.Println("    switch [env]   - 切换环境（不带参数则交互式选择）")
 	fmt.Println()
@@ -313,6 +318,9 @@ func (c *CLI) handleCommand(input string) {
 
 	case "proxy-stop":
 		c.stopProxyService()
+
+	case "proxy-restart":
+		c.restartProxyService()
 
 	case "proxy-status":
 		c.getProxyStatus()
@@ -457,8 +465,7 @@ func (c *CLI) startProxyService() {
 	// 验证服务是否启动成功
 	if c.isProxyRunning() {
 		c.printSuccess("代理服务已启动")
-		c.printInfo("管理端口: http://localhost:8001")
-		c.printInfo("代理端口: http://localhost:8080")
+		c.printInfo(fmt.Sprintf("代理端口: %s", proxyListenURL()))
 	} else {
 		c.printError("代理服务启动失败，请检查日志")
 	}
@@ -522,30 +529,32 @@ func (c *CLI) getProxyStatus() {
 
 	fmt.Println()
 
-	// 尝试获取详细状态
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
-	if err != nil {
-		c.printWarning("无法连接到管理接口")
-		return
-	}
-
-	fmt.Println(string(output))
+	c.listServices()
 }
 
 // switchEnvironment 切换环境
 func (c *CLI) switchEnvironment(env string) {
 	c.printInfo(fmt.Sprintf("切换到 %s 环境...", env))
 
-	cmd := exec.Command("curl", "-s", "-X", "POST", fmt.Sprintf("http://localhost:8001/switch?env=%s", env))
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError("切换失败")
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
+		return
+	}
+	if len(cfg.Services) == 0 {
+		c.printError("未配置服务")
+		return
+	}
+	for _, svc := range cfg.Services {
+		svc.ActiveEnv = env
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		c.printError(fmt.Sprintf("保存配置失败: %v", err))
 		return
 	}
 
-	fmt.Println(string(output))
-	c.printSuccess(fmt.Sprintf("已切换到 %s 环境", env))
+	c.printSuccess(fmt.Sprintf("已切换到 %s 环境 (配置已更新)", env))
+	c.promptProxyRestart()
 }
 
 // confirmAndExecute 确认后执行
@@ -824,74 +833,139 @@ func (c *CLI) findProxyBinary() string {
 	return ""
 }
 
-// isProxyRunning 检查代理服务是否运行（通过健康检查接口）
+func proxyListenAddr() string {
+	addr := config.ProxyPort
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	if strings.Contains(addr, ":") {
+		return addr
+	}
+	return "127.0.0.1:" + addr
+}
+
+func proxyListenURL() string {
+	return "http://" + proxyListenAddr()
+}
+
+func proxyPort() string {
+	addr := config.ProxyPort
+	if strings.HasPrefix(addr, ":") {
+		return strings.TrimPrefix(addr, ":")
+	}
+	if strings.Contains(addr, ":") {
+		parts := strings.Split(addr, ":")
+		return parts[len(parts)-1]
+	}
+	return addr
+}
+
+func (c *CLI) loadProxyConfig() (*config.Config, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Services == nil {
+		cfg.Services = make(map[string]*config.ServiceConfig)
+	}
+	if len(cfg.Services) > 0 {
+		if _, ok := cfg.Services[c.currentService]; !ok {
+			if _, ok := cfg.Services["default"]; ok {
+				c.currentService = "default"
+			} else {
+				for id := range cfg.Services {
+					c.currentService = id
+					break
+				}
+			}
+		}
+	}
+	return cfg, nil
+}
+
+func (c *CLI) promptProxyRestart() {
+	if !c.isProxyRunning() {
+		return
+	}
+	confirm, err := c.readLineWithPrompt("\033[1;33m配置已更新，代理需要重启生效，是否立即重启? (y/n): \033[0m")
+	if err != nil {
+		return
+	}
+	confirm = strings.ToLower(strings.TrimSpace(confirm))
+	if confirm == "y" || confirm == "yes" {
+		c.restartProxyService()
+	}
+}
+
+// isProxyRunning 检查代理服务是否运行（通过端口连通性）
 func (c *CLI) isProxyRunning() bool {
-	cmd := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8001/health")
-	output, err := cmd.Output()
+	addr := proxyListenAddr()
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	if err != nil {
 		return false
 	}
-	return string(output) == "200"
+	_ = conn.Close()
+	return true
 }
 
 // killProxyByPort 通过端口查找并停止进程
 func (c *CLI) killProxyByPort() bool {
+	port := proxyPort()
 	var pid string
 
-	// 方法1: 尝试使用 lsof (需要正确的参数格式)
-	lsofCmd := exec.Command("lsof", "-t", "-i:8001")
+	// ??1: ???? lsof
+	lsofCmd := exec.Command("lsof", "-t", "-i:"+port)
 	output, err := lsofCmd.Output()
 	if err == nil && len(output) > 0 {
 		pid = strings.TrimSpace(string(output))
 	}
 
-	// 方法2: 如果 lsof 失败，尝试使用 ss 命令
+	// ??2: ?? ss
 	if pid == "" {
-		ssCmd := exec.Command("sh", "-c", "ss -tlnp | grep :8001 | grep -oP 'pid=\\K[0-9]+'")
+		ssCmd := exec.Command("sh", "-c", fmt.Sprintf("ss -tlnp | grep :%s | grep -oP 'pid=\\K[0-9]+'", port))
 		output, err = ssCmd.Output()
 		if err == nil && len(output) > 0 {
 			pid = strings.TrimSpace(string(output))
 		}
 	}
 
-	// 方法3: 如果 ss 也失败，尝试使用 netstat
+	// ??3: ?? netstat
 	if pid == "" {
-		netstatCmd := exec.Command("sh", "-c", "netstat -tlnp 2>/dev/null | grep :8001 | awk '{print $7}' | cut -d/ -f1")
+		netstatCmd := exec.Command("sh", "-c", fmt.Sprintf("netstat -tlnp 2>/dev/null | grep :%s | awk '{print $7}' | cut -d/ -f1", port))
 		output, err = netstatCmd.Output()
 		if err == nil && len(output) > 0 {
 			pid = strings.TrimSpace(string(output))
 		}
 	}
 
-	// 如果所有方法都失败
+	// ?????????
 	if pid == "" || pid == "-" {
-		c.printWarning("未找到占用8001端口的进程")
-		c.printInfo("提示: 请尝试手动执行 'netstat -tlnp | grep 8001' 或 'lsof -i:8001' 查看进程")
+		c.printWarning(fmt.Sprintf("?????%s?????", port))
+		c.printInfo(fmt.Sprintf("??: ??????? 'netstat -tlnp | grep %s' ? 'lsof -i:%s'", port, port))
 		return false
 	}
 
-	c.printInfo(fmt.Sprintf("找到进程 PID: %s", pid))
+	c.printInfo(fmt.Sprintf("???? PID: %s", pid))
 
-	// 先尝试优雅关闭（SIGTERM）
+	// ???? (SIGTERM)
 	killCmd := exec.Command("kill", "-15", pid)
 	killCmd.Run()
 
-	// 等待进程关闭
+	// ??????
 	time.Sleep(1 * time.Second)
 
-	// 检查进程是否还在运行
+	// ??????????
 	checkCmd := exec.Command("kill", "-0", pid)
 	if checkCmd.Run() != nil {
-		// 进程已关闭
-		c.printSuccess(fmt.Sprintf("进程 %s 已停止", pid))
+		c.printSuccess(fmt.Sprintf("?? %s ???", pid))
 		return true
 	}
 
-	// 如果还在运行，强制杀死（SIGKILL）
-	c.printWarning(fmt.Sprintf("进程 %s 未响应，强制停止...", pid))
+	// ????????? (SIGKILL)
+	c.printWarning(fmt.Sprintf("?? %s ????????...", pid))
 	forceKillCmd := exec.Command("kill", "-9", pid)
 	if err := forceKillCmd.Run(); err != nil {
-		c.printWarning(fmt.Sprintf("强制杀死进程失败: %v", err))
+		c.printWarning(fmt.Sprintf("????????: %v", err))
 		return false
 	}
 
@@ -1064,50 +1138,40 @@ func (c *CLI) handleCert(args []string) {
 
 // addService 添加新服务
 func (c *CLI) addService() {
-	fmt.Println("\n\033[1;34m═══ 添加新服务 ═══\033[0m\n")
+	fmt.Println("\n\033[1;34m=== Add Service ===\033[0m\n")
 
-	// 服务ID
-	serviceID, err := c.readLineWithPrompt("\033[1;33m服务ID (英文标识，如 admin/collector): \033[0m")
+	// ??ID
+	serviceID, err := c.readLineWithPrompt("[1;33m服务ID (英文标识, 如 admin/collector): [0m")
 	if err != nil || serviceID == "" {
 		c.printError("服务ID不能为空")
 		return
 	}
 
-	// 检查服务ID是否已存在
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
-	if err == nil {
-		var status map[string]interface{}
-		if err := json.Unmarshal(output, &status); err == nil {
-			if services, ok := status["services"].([]interface{}); ok {
-				for _, s := range services {
-					if svc, ok := s.(map[string]interface{}); ok {
-						if id, ok := svc["id"].(string); ok && id == serviceID {
-							c.printError(fmt.Sprintf("服务ID[%s]已存在", serviceID))
-							return
-						}
-					}
-				}
-			}
-		}
+	cfg, err := c.loadProxyConfig()
+	if err != nil {
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
+		return
+	}
+	if _, exists := cfg.Services[serviceID]; exists {
+		c.printError(fmt.Sprintf("服务ID[%s]已存在", serviceID))
+		return
 	}
 
-	// 服务名称
-	serviceName, err := c.readLineWithPrompt("\033[1;33m服务名称 (显示名): \033[0m")
+	// ????
+	serviceName, err := c.readLineWithPrompt("[1;33m服务名称 (显示名): [0m")
 	if err != nil || serviceName == "" {
 		serviceName = serviceID
 	}
 
-	// JAR文件名模式(必填)
+	// JAR?????
 	defaultJarPattern := fmt.Sprintf("ruoyi-%s-*.jar", serviceID)
-	jarFilePrompt := fmt.Sprintf("\033[1;33mJAR文件名模式 (用于匹配带时间戳的JAR,默认: %s): \033[0m", defaultJarPattern)
+	jarFilePrompt := fmt.Sprintf("[1;33mJAR文件名模式(用于匹配带时间戳的JAR,默认: %s): [0m", defaultJarPattern)
 	jarFile, err := c.readLineWithPrompt(jarFilePrompt)
 	if err != nil || jarFile == "" {
 		jarFile = defaultJarPattern
 		c.printInfo(fmt.Sprintf("使用默认JAR模式: %s", jarFile))
 	}
 
-	// 检查JAR文件名是否和默认服务冲突
 	if jarFile == "ruoyi-*.jar" || jarFile == "ruoyi-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.jar" {
 		c.printError("JAR文件名模式不能和默认服务冲突")
 		c.printInfo("默认服务使用: ruoyi-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.jar (匹配 ruoyi-YYYYMMDD-HHMMSS.jar)")
@@ -1115,43 +1179,46 @@ func (c *CLI) addService() {
 		return
 	}
 
-	// APP名称（用于生成PID文件等）
-	appName, err := c.readLineWithPrompt("\033[1;33mAPP名称 (用于PID文件等，默认与服务ID相同): \033[0m")
+	// APP??
+	appName, err := c.readLineWithPrompt("[1;33mAPP名称 (用于PID文件等, 默认与服务ID相同): [0m")
 	if err != nil || appName == "" {
 		appName = serviceID
 	}
 
-	// 蓝色环境端口
-	bluePort, err := c.readLineWithPrompt("\033[1;33m蓝色环境端口 (如 8080): \033[0m")
+	// ??????
+	bluePort, err := c.readLineWithPrompt("[1;33m蓝色环境端口 (如 8080): [0m")
 	if err != nil || bluePort == "" {
 		c.printError("端口不能为空")
 		return
 	}
 
-	// 绿色环境端口
-	greenPort, err := c.readLineWithPrompt("\033[1;33m绿色环境端口 (如 8081): \033[0m")
+	// ??????
+	greenPort, err := c.readLineWithPrompt("[1;33m绿色环境端口 (如 8081): [0m")
 	if err != nil || greenPort == "" {
 		c.printError("端口不能为空")
 		return
 	}
 
-	// 调用API添加服务
-	payload := fmt.Sprintf(`{"id":"%s","name":"%s","blue_target":"http://127.0.0.1:%s","green_target":"http://127.0.0.1:%s","jar_file":"%s","app_name":"%s"}`,
-		serviceID, serviceName, bluePort, greenPort, jarFile, appName)
+	svcConfig := &config.ServiceConfig{
+		Name:        serviceName,
+		BlueTarget:  fmt.Sprintf("http://127.0.0.1:%s", bluePort),
+		GreenTarget: fmt.Sprintf("http://127.0.0.1:%s", greenPort),
+		ActiveEnv:   "blue",
+		JarFile:     jarFile,
+		AppName:     appName,
+	}
+	cfg.Services[serviceID] = svcConfig
 
-	cmd = exec.Command("curl", "-s", "-X", "POST", "-H", "Content-Type: application/json",
-		"-d", payload, "http://localhost:8001/service/add")
-	output, err = cmd.Output()
-	if err != nil {
-		c.printError("添加失败，请确保代理服务已启动")
+	if err := config.SaveConfig(cfg); err != nil {
+		c.printError(fmt.Sprintf("保存配置失败: %v", err))
 		return
 	}
 
-	fmt.Println(string(output))
-	c.printSuccess(fmt.Sprintf("服务[%s]添加成功", serviceID))
+	c.printSuccess(fmt.Sprintf("服务[%s]已添加", serviceID))
+	c.promptProxyRestart()
 
-	// 询问是否切换到新服务
-	confirm, err := c.readLineWithPrompt("\033[1;33m是否切换到新服务? (y/n): \033[0m")
+	// ????????
+	confirm, err := c.readLineWithPrompt("[1;33m是否切换到新服务? (y/n): [0m")
 	if err == nil && (confirm == "y" || confirm == "Y" || confirm == "yes") {
 		c.currentService = serviceID
 		c.printSuccess(fmt.Sprintf("已切换到服务[%s]", serviceID))
@@ -1163,84 +1230,82 @@ func (c *CLI) addService() {
 func (c *CLI) listServices() {
 	c.printInfo("查询服务列表...")
 
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError("获取失败，请确保代理服务已启动")
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
+		return
+	}
+	if len(cfg.Services) == 0 {
+		c.printWarning("未配置服务")
 		return
 	}
 
-	var status map[string]interface{}
-	if err := json.Unmarshal(output, &status); err != nil {
-		fmt.Println(string(output))
-		return
+	ids := make([]string, 0, len(cfg.Services))
+	for id := range cfg.Services {
+		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 
-	services, ok := status["services"].([]interface{})
-	if !ok {
-		fmt.Println(string(output))
-		return
-	}
+	fmt.Println("\n" + strings.Repeat("╱", 90))
+	fmt.Printf("[1;34m服务列表 (共%d 个)[0m\n", len(ids))
 
-	fmt.Println("\n" + strings.Repeat("═", 90))
-	fmt.Printf("\033[1;34m服务列表 (共 %d 个)\033[0m\n", len(services))
-	fmt.Println(strings.Repeat("═", 90))
+	fmt.Println(strings.Repeat("╱", 90))
 
-	fmt.Printf("  \033[1;33m%-12s  %-15s  %-20s  %-8s  %s\033[0m\n", "ID", "名称", "JAR文件", "环境", "目标地址")
+	fmt.Printf("  [1;33m%-12s  %-15s  %-20s  %-8s  %s[0m\n", "ID", "名称", "JAR文件", "环境", "目标地址")
+
 	fmt.Printf("  %s  %s  %s  %s  %s\n",
+
 		strings.Repeat("-", 12), strings.Repeat("-", 15), strings.Repeat("-", 20),
 		strings.Repeat("-", 8), strings.Repeat("-", 25))
 
-	for _, s := range services {
-		svc, ok := s.(map[string]interface{})
-		if !ok {
-			continue
+	for _, id := range ids {
+		svc := cfg.Services[id]
+		name := svc.Name
+		if name == "" {
+			name = id
 		}
-		id := svc["id"].(string)
-		name := svc["name"].(string)
-		env := svc["active_env"].(string)
-		target := svc["blue_target"].(string)
+		env := svc.ActiveEnv
+		target := svc.BlueTarget
 		if env == "green" {
-			target = svc["green_target"].(string)
+			target = svc.GreenTarget
 		}
 
-		// 获取jar_file，如果没有则显示默认值
 		jarFile := "ruoyi-*.jar"
-		if jf, ok := svc["jar_file"].(string); ok && jf != "" {
-			jarFile = jf
+		if svc.JarFile != "" {
+			jarFile = svc.JarFile
 		}
 
-		envColor := "\033[1;34m"
+		envColor := "[1;34m"
 		if env == "green" {
-			envColor = "\033[1;32m"
+			envColor = "[1;32m"
 		}
 
-		// 标记当前服务
 		mark := ""
 		if id == c.currentService {
-			mark = " \033[1;32m← 当前\033[0m"
+			mark = " [1;32m→当前[0m"
 		}
 
-		fmt.Printf("  %-12s  %-15s  %-20s  %s%-8s\033[0m  %s%s\n",
+		fmt.Printf("  %-12s  %-15s  %-20s  %s%-8s[0m  %s%s\n",
+
 			id, name, jarFile, envColor, env, target, mark)
 	}
-	fmt.Println(strings.Repeat("─", 90))
+	fmt.Println(strings.Repeat("╰", 90))
 }
 
 // removeService 删除服务
 func (c *CLI) removeService() {
-	fmt.Println("\n\033[1;34m═══ 删除服务 ═══\033[0m\n")
+	fmt.Println("\n\033[1;34m=== Remove Service ===\033[0m\n")
 
-	// 先显示服务列表
+	// ???????
 	c.listServices()
 
-	serviceID, err := c.readLineWithPrompt("\033[1;33m输入要删除的服务ID: \033[0m")
+	serviceID, err := c.readLineWithPrompt("[1;33m输入要删除的服务ID: [0m")
 	if err != nil || serviceID == "" {
 		c.printError("服务ID不能为空")
 		return
 	}
 
-	confirm, err := c.readLineWithPrompt(fmt.Sprintf("\033[1;31m确认删除服务[%s]? (yes/no): \033[0m", serviceID))
+	confirm, err := c.readLineWithPrompt(fmt.Sprintf("[1;31m确认删除服务[%s]? (yes/no): [0m", serviceID))
 	if err != nil {
 		c.printInfo("已取消")
 		return
@@ -1252,99 +1317,100 @@ func (c *CLI) removeService() {
 		return
 	}
 
-	cmd := exec.Command("curl", "-s", "-X", "DELETE",
-		fmt.Sprintf("http://localhost:8001/service/remove?id=%s", serviceID))
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError("删除失败")
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
+		return
+	}
+	if _, exists := cfg.Services[serviceID]; !exists {
+		c.printError(fmt.Sprintf("服务[%s]不存在", serviceID))
+		return
+	}
+	if len(cfg.Services) <= 1 {
+		c.printError("至少需要保留一个服务")
 		return
 	}
 
-	fmt.Println(string(output))
+	delete(cfg.Services, serviceID)
+	if err := config.SaveConfig(cfg); err != nil {
+		c.printError(fmt.Sprintf("保存配置失败: %v", err))
+		return
+	}
+
 	c.printSuccess(fmt.Sprintf("服务[%s]已删除", serviceID))
 
-	// 如果删除的是当前服务，切换回default
 	if serviceID == c.currentService {
-		c.currentService = "default"
-		c.printInfo("已自动切换回默认服务")
+		if _, ok := cfg.Services["default"]; ok {
+			c.currentService = "default"
+		} else {
+			for id := range cfg.Services {
+				c.currentService = id
+				break
+			}
+		}
+		c.printInfo("已自动切换当前服务")
 	}
+
+	c.promptProxyRestart()
 }
 
 // switchService 切换当前服务
 func (c *CLI) switchService() {
-	fmt.Println("\n\033[1;34m═══ 切换当前服务 ═══\033[0m\n")
+	fmt.Println("\n\033[1;34m=== Switch Service ===\033[0m\n")
 
-	// 获取服务列表
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError("获取服务列表失败，请确保代理服务已启动")
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
+		return
+	}
+	if len(cfg.Services) == 0 {
+		c.printError("未配置服务")
 		return
 	}
 
-	var status map[string]interface{}
-	if err := json.Unmarshal(output, &status); err != nil {
-		c.printError("解析服务列表失败")
-		return
+	ids := make([]string, 0, len(cfg.Services))
+	for id := range cfg.Services {
+		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 
-	services, ok := status["services"].([]interface{})
-	if !ok {
-		c.printError("服务列表格式错误")
-		return
-	}
+	fmt.Println("[1;33m可用服务:[0m")
+	fmt.Println(strings.Repeat("╰", 60))
 
-	// 显示服务列表
-	fmt.Println("\033[1;33m可用服务:\033[0m")
-	fmt.Println(strings.Repeat("─", 60))
-
-	serviceIDs := make([]string, 0)
-	for i, s := range services {
-		svc, ok := s.(map[string]interface{})
-		if !ok {
-			continue
+	for i, id := range ids {
+		svc := cfg.Services[id]
+		name := svc.Name
+		if name == "" {
+			name = id
 		}
-		id := svc["id"].(string)
-		name := svc["name"].(string)
-
-		serviceIDs = append(serviceIDs, id)
-
-		// 标记当前服务
 		mark := ""
 		if id == c.currentService {
-			mark = " \033[1;32m← 当前\033[0m"
+			mark = " [1;32m→当前[0m"
 		}
-
 		fmt.Printf("  %d. %-12s  %s%s\n", i+1, id, name, mark)
-	}
-	fmt.Println(strings.Repeat("─", 60))
 
-	// 输入选择
-	choice, err := c.readLineWithPrompt("\033[1;33m选择服务 (输入编号或ID): \033[0m")
+	}
+	fmt.Println(strings.Repeat("╰", 60))
+
+	choice, err := c.readLineWithPrompt("[1;33m选择服务 (输入编号或ID): [0m")
 	if err != nil || choice == "" {
 		c.printInfo("已取消")
 		return
 	}
 
 	var selectedID string
-
-	// 尝试解析为数字
 	var index int
-	if n, err := fmt.Sscanf(choice, "%d", &index); err == nil && n == 1 && index > 0 && index <= len(serviceIDs) {
-		selectedID = serviceIDs[index-1]
+	if n, err := fmt.Sscanf(choice, "%d", &index); err == nil && n == 1 && index > 0 && index <= len(ids) {
+		selectedID = ids[index-1]
 	} else {
-		// 直接作为ID
-		selectedID = choice
-
-		// 验证ID是否存在
+		selectedID = strings.TrimSpace(choice)
 		found := false
-		for _, id := range serviceIDs {
+		for _, id := range ids {
 			if id == selectedID {
 				found = true
 				break
 			}
 		}
-
 		if !found {
 			c.printError(fmt.Sprintf("服务[%s]不存在", selectedID))
 			return
@@ -1358,57 +1424,27 @@ func (c *CLI) switchService() {
 
 // executeServiceCommand 执行当前服务的命令
 func (c *CLI) executeServiceCommand(command string) {
-	// 获取当前服务配置
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError("获取服务配置失败，请确保代理服务已启动")
-		c.printInfo("提示：请先执行 proxy-start 启动代理服务")
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
 		return
 	}
 
-	var status map[string]interface{}
-	if err := json.Unmarshal(output, &status); err != nil {
-		c.printError("解析服务配置失败")
-		return
-	}
-
-	services, ok := status["services"].([]interface{})
-	if !ok {
-		c.printError("服务列表格式错误")
-		return
-	}
-
-	// 查找当前服务
-	var currentSvc map[string]interface{}
-	for _, s := range services {
-		svc, ok := s.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if id, ok := svc["id"].(string); ok && id == c.currentService {
-			currentSvc = svc
-			break
-		}
-	}
-
-	if currentSvc == nil {
+	svc := cfg.GetService(c.currentService)
+	if svc == nil {
 		c.printError(fmt.Sprintf("未找到当前服务[%s]的配置", c.currentService))
-		c.printInfo("提示：使用 service-list 查看所有服务")
+		c.printInfo("提示: 使用 service-list 查看所有服务")
 		return
 	}
 
-	// 提取服务配置
-	jarFile, _ := currentSvc["jar_file"].(string)
-	appName, _ := currentSvc["app_name"].(string)
-	blueTarget, _ := currentSvc["blue_target"].(string)
-	greenTarget, _ := currentSvc["green_target"].(string)
+	jarFile := svc.JarFile
+	appName := svc.AppName
+	blueTarget := svc.BlueTarget
+	greenTarget := svc.GreenTarget
 
-	// 从目标地址提取端口
 	bluePort := extractPort(blueTarget)
 	greenPort := extractPort(greenTarget)
 
-	// 默认值
 	if jarFile == "" {
 		jarFile = "ruoyi-*.jar"
 	}
@@ -1422,22 +1458,22 @@ func (c *CLI) executeServiceCommand(command string) {
 		greenPort = "8081"
 	}
 
-	// 显示当前操作的服务信息
-	serviceName := currentSvc["name"].(string)
+	serviceName := svc.Name
+	if serviceName == "" {
+		serviceName = c.currentService
+	}
 	c.printInfo(fmt.Sprintf("操作服务: %s (%s)", serviceName, c.currentService))
 
-	// 查找脚本路径
 	scriptPath := c.findScript("service.sh")
 	if scriptPath == "" {
-		c.printError("未找到脚本: service.sh")
+		c.printError("未找到脚本 service.sh")
 		return
 	}
 
 	c.printInfo(fmt.Sprintf("执行: SERVICE_ID=%s APP_NAME=%s JAR=%s BLUE=%s GREEN=%s %s %s",
 		c.currentService, appName, jarFile, bluePort, greenPort, scriptPath, command))
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println(strings.Repeat("╰", 60))
 
-	// 准备环境变量
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("SERVICE_ID=%s", c.currentService))
 	env = append(env, fmt.Sprintf("APP_NAME=%s", appName))
@@ -1445,7 +1481,6 @@ func (c *CLI) executeServiceCommand(command string) {
 	env = append(env, fmt.Sprintf("BLUE_PORT=%s", bluePort))
 	env = append(env, fmt.Sprintf("GREEN_PORT=%s", greenPort))
 
-	// 执行命令
 	execCmd := exec.Command("bash", scriptPath, command)
 	execCmd.Env = env
 	execCmd.Stdout = os.Stdout
@@ -1456,58 +1491,29 @@ func (c *CLI) executeServiceCommand(command string) {
 		c.printError(fmt.Sprintf("执行失败: %v", err))
 	}
 
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println(strings.Repeat("╰", 60))
 }
 
 // executeServiceLogCommand 执行日志相关命令（优先使用当前服务配置，失败则回退默认）
 func (c *CLI) executeServiceLogCommand(command string, args ...string) {
-	// 尝试获取当前服务配置
-	cmd := exec.Command("curl", "-s", "http://localhost:8001/status")
-	output, err := cmd.Output()
+	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printWarning("无法获取服务配置，回退为默认日志")
+		c.printWarning("无法读取配置，使用默认日志")
 		c.executeScript(append([]string{"service.sh", command}, args...)...)
 		return
 	}
 
-	var status map[string]interface{}
-	if err := json.Unmarshal(output, &status); err != nil {
-		c.printWarning("解析服务配置失败，回退为默认日志")
-		c.executeScript(append([]string{"service.sh", command}, args...)...)
-		return
-	}
-
-	services, ok := status["services"].([]interface{})
-	if !ok {
-		c.printWarning("服务配置格式异常，回退为默认日志")
-		c.executeScript(append([]string{"service.sh", command}, args...)...)
-		return
-	}
-
-	// 查找当前服务
-	var currentSvc map[string]interface{}
-	for _, s := range services {
-		svc, ok := s.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if id, ok := svc["id"].(string); ok && id == c.currentService {
-			currentSvc = svc
-			break
-		}
-	}
-
-	if currentSvc == nil {
+	svc := cfg.GetService(c.currentService)
+	if svc == nil {
 		c.printError(fmt.Sprintf("未找到当前服务[%s]的配置", c.currentService))
-		c.printInfo("提示：使用 service-list 查看所有服务")
+		c.printInfo("提示: 使用 service-list 查看所有服务")
 		return
 	}
 
-	// 提取服务配置
-	jarFile, _ := currentSvc["jar_file"].(string)
-	appName, _ := currentSvc["app_name"].(string)
-	blueTarget, _ := currentSvc["blue_target"].(string)
-	greenTarget, _ := currentSvc["green_target"].(string)
+	jarFile := svc.JarFile
+	appName := svc.AppName
+	blueTarget := svc.BlueTarget
+	greenTarget := svc.GreenTarget
 
 	bluePort := extractPort(blueTarget)
 	greenPort := extractPort(greenTarget)
@@ -1525,18 +1531,21 @@ func (c *CLI) executeServiceLogCommand(command string, args ...string) {
 		greenPort = "8081"
 	}
 
-	serviceName := currentSvc["name"].(string)
+	serviceName := svc.Name
+	if serviceName == "" {
+		serviceName = c.currentService
+	}
 	c.printInfo(fmt.Sprintf("查看服务日志: %s (%s)", serviceName, c.currentService))
 
 	scriptPath := c.findScript("service.sh")
 	if scriptPath == "" {
-		c.printError("未找到脚本: service.sh")
+		c.printError("未找到脚本 service.sh")
 		return
 	}
 
 	c.printInfo(fmt.Sprintf("执行: SERVICE_ID=%s APP_NAME=%s JAR=%s BLUE=%s GREEN=%s %s %s %s",
 		c.currentService, appName, jarFile, bluePort, greenPort, scriptPath, command, strings.Join(args, " ")))
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println(strings.Repeat("╰", 60))
 
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("SERVICE_ID=%s", c.currentService))
@@ -1556,7 +1565,7 @@ func (c *CLI) executeServiceLogCommand(command string, args ...string) {
 		c.printError(fmt.Sprintf("执行失败: %v", err))
 	}
 
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println(strings.Repeat("╰", 60))
 }
 
 // isLogsListHint 判断是否为日志文件列表提示
@@ -1823,6 +1832,15 @@ func (c *CLI) selectLogFileMenu() (string, bool) {
 			return "", false
 		}
 	}
+}
+
+// restartProxyService 重启代理服务
+func (c *CLI) restartProxyService() {
+	c.printInfo("重启代理服务...")
+	if c.isProxyRunning() {
+		c.stopProxyService()
+	}
+	c.startProxyService()
 }
 
 // interactiveLogsSearch 交互式日志查询

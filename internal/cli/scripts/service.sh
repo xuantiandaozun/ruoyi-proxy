@@ -13,7 +13,6 @@ SPRING_PROFILE="${SPRING_PROFILE:-prod}"
 BLUE_PORT="${BLUE_PORT:-8080}"
 GREEN_PORT="${GREEN_PORT:-8081}"
 PROXY_PORT="${PROXY_PORT:-8000}"
-PROXY_MGMT_PORT="${PROXY_MGMT_PORT:-8001}"
 
 # 部署配置
 KEEP_HISTORY_JARS=2
@@ -181,33 +180,30 @@ get_other_env() {
 
 # 改进的代理状态检查 - 优先使用端口检查
 check_proxy_status() {
-    # 方案1：只检查端口（最简单可靠）
+    # ??1?????????????
     if command -v nc >/dev/null 2>&1; then
         if nc -z localhost $PROXY_PORT 2>/dev/null; then
-            # 再检查管理端口确保是我们的代理程序
-            if nc -z localhost $PROXY_MGMT_PORT 2>/dev/null; then
-                echo "running"
-                return 0
-            fi
-        fi
-    fi
-    
-    # 方案2：如果没有nc，通过curl检查管理接口
-    if command -v curl >/dev/null 2>&1; then
-        if curl -s --connect-timeout 2 "localhost:$PROXY_MGMT_PORT/health" >/dev/null 2>&1; then
             echo "running"
             return 0
         fi
     fi
     
-    # 方案3：最后才检查PID文件（作为备选）
+    # ??2?????nc???curl??????
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s --connect-timeout 2 "localhost:$PROXY_PORT" >/dev/null 2>&1; then
+            echo "running"
+            return 0
+        fi
+    fi
+    
+    # ??3??????PID????????
     if [ -f "$PROXY_PID_FILE" ] && [ -s "$PROXY_PID_FILE" ]; then
         local pid=$(cat "$PROXY_PID_FILE")
         if kill -0 $pid 2>/dev/null; then
             echo "running"
             return 0
         else
-            # PID文件无效，清理它
+            # PID????????
             rm -f "$PROXY_PID_FILE"
         fi
     fi
@@ -689,45 +685,15 @@ switch_env() {
     local target_env="$1"
     
     if [ "$target_env" != "blue" ] && [ "$target_env" != "green" ]; then
-        echo -e "${RED}错误: 环境必须是 blue 或 green${NC}"
+        echo -e "${RED}??: ????? blue ? green${NC}"
         return 1
     fi
     
-    if [ "$(check_proxy_status)" != "running" ]; then
-        echo -e "${RED}错误: 代理程序未运行${NC}"
-        return 1
-    fi
+    echo -e "${BLUE}??? $target_env ??${NC}"
+    set_active_env "$target_env"
     
-    echo -e "${BLUE}切换到 $target_env 环境${NC}"
-    
-    if command -v curl >/dev/null 2>&1; then
-        local response=$(curl -s -X POST "localhost:$PROXY_MGMT_PORT/switch?env=$target_env" 2>/dev/null)
-        local curl_exit_code=$?
-        
-        echo -e "${CYAN}代理响应: $response${NC}"
-        
-        if [ $curl_exit_code -eq 0 ]; then
-            echo -e "${GREEN}代理切换请求发送成功${NC}"
-            set_active_env "$target_env"
-            
-            # 验证切换结果
-            sleep 1
-            local status_response=$(curl -s "localhost:$PROXY_MGMT_PORT/status" 2>/dev/null)
-            if echo "$status_response" | grep -q "\"active_env\":\"$target_env\""; then
-                echo -e "${GREEN}环境切换验证成功${NC}"
-                return 0
-            else
-                echo -e "${YELLOW}环境切换验证失败，但继续执行${NC}"
-                return 0
-            fi
-        else
-            echo -e "${RED}切换失败 (curl退出码: $curl_exit_code)${NC}"
-            return 1
-        fi
-    else
-        echo -e "${RED}错误: 需要curl命令${NC}"
-        return 1
-    fi
+    echo -e "${YELLOW}??: ?????????????????${NC}"
+    return 0
 }
 
 # 清理旧文件
