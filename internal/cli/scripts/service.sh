@@ -13,6 +13,7 @@ SPRING_PROFILE="${SPRING_PROFILE:-prod}"
 BLUE_PORT="${BLUE_PORT:-8080}"
 GREEN_PORT="${GREEN_PORT:-8081}"
 PROXY_PORT="${PROXY_PORT:-8000}"
+PROXY_MGMT_PORT="${PROXY_MGMT_PORT:-8001}"
 
 # 部署配置
 KEEP_HISTORY_JARS=2
@@ -65,9 +66,14 @@ check_permissions() {
 }
 
 # ==================== 脚本逻辑 ====================
-APP_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROXY_BINARY="$APP_HOME/ruoyi-proxy"
-PROXY_CONFIG="$APP_HOME/proxy_config.json"
+# 获取脚本所在目录的绝对路径
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# APP_HOME 优先使用环境变量，如果没有设置则使用脚本父目录
+if [ -z "$APP_HOME" ]; then
+    APP_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+PROXY_BINARY="$APP_HOME/bin/ruoyi-proxy"
+PROXY_CONFIG="$APP_HOME/configs/app_config.json"
 PROXY_PID_FILE="$APP_HOME/ruoyi-proxy.pid"
 PROXY_LOG_FILE="$APP_HOME/logs/ruoyi-proxy.log"
 

@@ -84,7 +84,7 @@ func (c *CLI) Start() {
 		readline.PcItem("service-add"),
 		readline.PcItem("service-list"),
 		readline.PcItem("service-remove"),
-		readline.PcItem("service-switch"),
+		readline.PcItem("jvm-config"),
 	)
 
 	// 初始化脚本和配置文件
@@ -203,6 +203,7 @@ func (c *CLI) printHelp() {
 	fmt.Println("  \033[1;33m配置管理:\033[0m")
 	fmt.Println("    config         - 查看完整配置")
 	fmt.Println("    config-edit    - 编辑配置")
+	fmt.Println("    jvm-config     - JVM参数配置")
 	fmt.Println()
 	fmt.Println("  \033[1;33m系统信息:\033[0m")
 	fmt.Println("    info           - 显示系统信息")
@@ -369,6 +370,9 @@ func (c *CLI) handleCommand(input string) {
 
 	case "service-switch":
 		c.switchService()
+
+	case "jvm-config":
+		c.JVMConfig()
 
 	default:
 		c.printError(fmt.Sprintf("未知命令: %s", cmd))
@@ -1474,12 +1478,20 @@ func (c *CLI) executeServiceCommand(command string) {
 		c.currentService, appName, jarFile, bluePort, greenPort, scriptPath, command))
 	fmt.Println(strings.Repeat("╰", 60))
 
+	// 获取应用根目录并设置 APP_HOME 环境变量
+	appHome, err := c.getAppHome()
+	if err != nil {
+		c.printError(fmt.Sprintf("无法确定应用根目录: %v", err))
+		return
+	}
+
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("SERVICE_ID=%s", c.currentService))
 	env = append(env, fmt.Sprintf("APP_NAME=%s", appName))
 	env = append(env, fmt.Sprintf("APP_JAR_PATTERN=%s", jarFile))
 	env = append(env, fmt.Sprintf("BLUE_PORT=%s", bluePort))
 	env = append(env, fmt.Sprintf("GREEN_PORT=%s", greenPort))
+	env = append(env, fmt.Sprintf("APP_HOME=%s", appHome))
 
 	execCmd := exec.Command("bash", scriptPath, command)
 	execCmd.Env = env
@@ -1547,12 +1559,20 @@ func (c *CLI) executeServiceLogCommand(command string, args ...string) {
 		c.currentService, appName, jarFile, bluePort, greenPort, scriptPath, command, strings.Join(args, " ")))
 	fmt.Println(strings.Repeat("╰", 60))
 
+	// 获取应用根目录并设置 APP_HOME 环境变量
+	appHome, err := c.getAppHome()
+	if err != nil {
+		c.printError(fmt.Sprintf("无法确定应用根目录: %v", err))
+		return
+	}
+
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("SERVICE_ID=%s", c.currentService))
 	env = append(env, fmt.Sprintf("APP_NAME=%s", appName))
 	env = append(env, fmt.Sprintf("APP_JAR_PATTERN=%s", jarFile))
 	env = append(env, fmt.Sprintf("BLUE_PORT=%s", bluePort))
 	env = append(env, fmt.Sprintf("GREEN_PORT=%s", greenPort))
+	env = append(env, fmt.Sprintf("APP_HOME=%s", appHome))
 
 	cmdArgs := append([]string{scriptPath, command}, args...)
 	execCmd := exec.Command("bash", cmdArgs...)

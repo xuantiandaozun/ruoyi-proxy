@@ -27,8 +27,87 @@ PROXY_MGMT_PORT="${PROXY_MGMT_PORT:-8001}"
 KEEP_HISTORY_JARS=2
 STARTUP_TIMEOUT=30
 
-# JVM参数配置
-BASE_JVM_OPTS="-server \
+# JVM配置（从配置文件读取，可通过环境变量覆盖）
+JVM_PRESET="${JVM_PRESET:-}"
+JVM_CUSTOM_OPTS="${JVM_CUSTOM_OPTS:-}"
+
+# 从配置文件读取JVM参数
+load_jvm_config() {
+    local config_file="$APP_HOME/configs/app_config.json"
+    
+    if [ ! -f "$config_file" ]; then
+        echo -e "${YELLOW}警告: 配置文件不存在，使用默认JVM参数${NC}"
+        return 1
+    fi
+    
+    # 检查是否有jq命令
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}警告: 未找到jq命令，使用默认JVM参数${NC}"
+        echo -e "${CYAN}提示: 安装jq以支持JVM配置读取 (apt install jq / yum install jq)${NC}"
+        return 1
+    fi
+    
+    # 读取预设档位
+    local preset="$JVM_PRESET"
+    if [ -z "$preset" ]; then
+        preset=$(jq -r '.jvm.preset // "2"' "$config_file" 2>/dev/null)
+    fi
+    
+    # 验证预设档位
+    if [[ ! "$preset" =~ ^[123]$ ]]; then
+        echo -e "${YELLOW}警告: 无效的JVM预设档位 '$preset'，使用默认值2${NC}"
+        preset="2"
+    fi
+    
+    # 读取预设配置
+    local xms=$(jq -r ".jvm.presets.\"$preset\".xms // \"1g\"" "$config_file" 2>/dev/null)
+    local xmx=$(jq -r ".jvm.presets.\"$preset\".xmx // \"3g\"" "$config_file" 2>/dev/null)
+    local metaspace=$(jq -r ".jvm.presets.\"$preset\".metaspace_size // \"256m\"" "$config_file" 2>/dev/null)
+    local max_metaspace=$(jq -r ".jvm.presets.\"$preset\".max_metaspace_size // \"512m\"" "$config_file" 2>/dev/null)
+    local gc_threads=$(jq -r ".jvm.presets.\"$preset\".gc_threads // \"3\"" "$config_file" 2>/dev/null)
+    local parallel_gc=$(jq -r ".jvm.presets.\"$preset\".parallel_gc_threads // \"3\"" "$config_file" 2>/dev/null)
+    local preset_name=$(jq -r ".jvm.presets.\"$preset\".name // \"预设$preset\"" "$config_file" 2>/dev/null)
+    
+    # 读取自定义参数
+    local custom_opts="$JVM_CUSTOM_OPTS"
+    if [ -z "$custom_opts" ]; then
+        custom_opts=$(jq -r '.jvm.custom_opts // ""' "$config_file" 2>/dev/null)
+    fi
+    
+    echo -e "${CYAN}使用JVM配置 - 档位 $preset: $preset_name${NC}"
+    echo -e "${CYAN}  堆内存: -Xms$xms -Xmx$xmx${NC}"
+    echo -e "${CYAN}  元空间: -XX:MetaspaceSize=$metaspace -XX:MaxMetaspaceSize=$max_metaspace${NC}"
+    
+    # 构建JVM参数
+    BASE_JVM_OPTS="-server \
+-Xms$xms \
+-Xmx$xmx \
+-XX:MetaspaceSize=$metaspace \
+-XX:MaxMetaspaceSize=$max_metaspace \
+-XX:ParallelGCThreads=$parallel_gc \
+-XX:ConcGCThreads=$gc_threads \
+-XX:+UseG1GC \
+-XX:MaxGCPauseMillis=200 \
+-XX:+UseStringDeduplication \
+-XX:+HeapDumpOnOutOfMemoryError \
+-XX:HeapDumpPath=./logs/ \
+-Xlog:gc*:./logs/gc.log:time,tags \
+-XX:+ShowCodeDetailsInExceptionMessages \
+-Dfile.encoding=UTF-8 \
+-Djava.security.egd=file:/dev/./urandom"
+    
+    # 添加自定义参数
+    if [ -n "$custom_opts" ]; then
+        BASE_JVM_OPTS="$BASE_JVM_OPTS $custom_opts"
+        echo -e "${CYAN}  自定义参数: $custom_opts${NC}"
+    fi
+    
+    return 0
+}
+
+# 默认JVM参数（当配置文件不存在时使用）
+set_default_jvm_opts() {
+    BASE_JVM_OPTS="-server \
 -Xms1g \
 -Xmx3g \
 -XX:+UseG1GC \
@@ -40,6 +119,8 @@ BASE_JVM_OPTS="-server \
 -XX:+ShowCodeDetailsInExceptionMessages \
 -Dfile.encoding=UTF-8 \
 -Djava.security.egd=file:/dev/./urandom"
+    echo -e "${YELLOW}使用默认JVM参数 (3核4G配置)${NC}"
+}
 
 # ==================== 权限和环境检查 ====================
 check_permissions() {
@@ -72,8 +153,10 @@ check_permissions() {
 # ==================== 脚本逻辑 ====================
 # 获取脚本所在目录的绝对路径
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# APP_HOME 是 scripts 的父目录
-APP_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+# APP_HOME 优先使用环境变量，如果没有设置则使用脚本父目录
+if [ -z "$APP_HOME" ]; then
+    APP_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 PROXY_BINARY="$APP_HOME/bin/ruoyi-proxy"
 PROXY_CONFIG="$APP_HOME/configs/app_config.json"
 PROXY_PID_FILE="$APP_HOME/ruoyi-proxy.pid"
@@ -155,22 +238,19 @@ get_other_env() {
     fi
 }
 
-# 改进的代理状态检查 - 优先使用端口检查
+# 改进的代理状态检查 - 只检查代理端口
 check_proxy_status() {
-    # 方案1：只检查端口（最简单可靠）
+    # 方案1：检查代理端口（最简单可靠）
     if command -v nc >/dev/null 2>&1; then
         if nc -z localhost $PROXY_PORT 2>/dev/null; then
-            # 再检查管理端口确保是我们的代理程序
-            if nc -z localhost $PROXY_MGMT_PORT 2>/dev/null; then
-                echo "running"
-                return 0
-            fi
+            echo "running"
+            return 0
         fi
     fi
     
-    # 方案2：如果没有nc，通过curl检查管理接口
+    # 方案2：如果没有nc，通过curl检查代理端口
     if command -v curl >/dev/null 2>&1; then
-        if curl -s --connect-timeout 2 "localhost:$PROXY_MGMT_PORT/health" >/dev/null 2>&1; then
+        if curl -s --connect-timeout 2 "localhost:$PROXY_PORT" >/dev/null 2>&1; then
             echo "running"
             return 0
         fi
@@ -308,6 +388,11 @@ start_env() {
     fi
     
     mkdir -p "$APP_HOME/logs"
+    
+    # 加载JVM配置
+    if ! load_jvm_config; then
+        set_default_jvm_opts
+    fi
     
     # 构建启动命令
     local JAVA_OPTS="$BASE_JVM_OPTS"
@@ -1246,6 +1331,12 @@ help() {
     echo "  蓝色端口: $BLUE_PORT"
     echo "  绿色端口: $GREEN_PORT" 
     echo "  代理端口: $PROXY_PORT"
+    echo ""
+    echo -e "${CYAN}JVM配置:${NC}"
+    echo "  配置文件: configs/app_config.json"
+    echo "  预设档位: 1(1核2G) | 2(3核4G) | 3(4核8G)"
+    echo "  环境变量: JVM_PRESET=1|2|3  (覆盖配置文件)"
+    echo "  环境变量: JVM_CUSTOM_OPTS='-XX:+SomeOption'  (添加自定义参数)"
 }
 
 # ==================== 主程序 ====================

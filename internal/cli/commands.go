@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -88,7 +89,6 @@ func (c *CLI) ShowDetailedStatus() {
 	fmt.Fprintf(w2, "[1;33m  %-12s	%-15s	%-8s	%s[0m\n", "ID", "名称", "环境", "目标地址")
 
 	fmt.Fprintf(w2, "  %s	%s	%s	%s\n", strings.Repeat("-", 12), strings.Repeat("-", 15), strings.Repeat("-", 8), strings.Repeat("-", 25))
-
 
 	for _, svc := range services {
 		envColor := "[1;34m"
@@ -185,8 +185,6 @@ func (c *CLI) ShowLogs(lines string) {
 func (c *CLI) InteractiveSwitch() {
 	fmt.Println("\n\033[1;34m=== �����л� ===\033[0m\n")
 
-
-
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
 		c.printError(fmt.Sprintf("��ȡ����ʧ��: %v", err))
@@ -213,7 +211,6 @@ func (c *CLI) InteractiveSwitch() {
 	fmt.Println("  1. �л����з���")
 	fmt.Println("  2. �л���������")
 	fmt.Println("  0. ȡ��")
-
 
 	choice, err := c.readLineWithPrompt("\n\033[1;33mѡ��: \033[0m")
 
@@ -377,10 +374,206 @@ func (c *CLI) ShowQuickCommands() {
 	fmt.Println()
 }
 
+// JVMConfig JVM配置管理
+func (c *CLI) JVMConfig() {
+	fmt.Println("\n\033[1;34m═══ JVM配置管理 ═══\033[0m\n")
+
+	configFile := "configs/app_config.json"
+
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		c.printError("配置文件不存在，请先运行 init 命令初始化")
+		return
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		c.printError("配置文件格式错误")
+		return
+	}
+
+	jvm, ok := config["jvm"].(map[string]interface{})
+	if !ok {
+		c.printError("JVM配置不存在")
+		return
+	}
+
+	// 显示当前配置
+	currentPreset := int(jvm["preset"].(float64))
+	customOpts := ""
+	if co, ok := jvm["custom_opts"].(string); ok {
+		customOpts = co
+	}
+
+	fmt.Printf("当前JVM预设档位: \033[1;36m%d\033[0m\n", currentPreset)
+	if customOpts != "" {
+		fmt.Printf("自定义参数: \033[1;36m%s\033[0m\n", customOpts)
+	}
+
+	// 显示预设配置
+	presets, ok := jvm["presets"].(map[string]interface{})
+	if !ok {
+		c.printError("预设配置不存在")
+		return
+	}
+
+	fmt.Println("\n\033[1;33m可用预设档位:\033[0m")
+	for i := 1; i <= 3; i++ {
+		key := fmt.Sprintf("%d", i)
+		if preset, ok := presets[key].(map[string]interface{}); ok {
+			name := preset["name"].(string)
+			xms := preset["xms"].(string)
+			xmx := preset["xmx"].(string)
+			gcThreads := int(preset["gc_threads"].(float64))
+			mark := ""
+			if i == currentPreset {
+				mark = " \033[1;32m← 当前\033[0m"
+			}
+			fmt.Printf("  %d. %s - 堆内存:%s-%s, GC线程:%d%s\n", i, name, xms, xmx, gcThreads, mark)
+		}
+	}
+
+	fmt.Println("\n\033[1;33m操作选项:\033[0m")
+	fmt.Println("  1. 切换预设档位")
+	fmt.Println("  2. 设置自定义参数")
+	fmt.Println("  3. 查看详细配置")
+	fmt.Println("  0. 返回")
+
+	choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
+	if err != nil {
+		return
+	}
+
+	switch strings.TrimSpace(choice) {
+	case "1":
+		c.switchJVMPreset(config, jvm, presets)
+	case "2":
+		c.setJVMCustomOpts(config, jvm)
+	case "3":
+		c.showJVMDetail(jvm)
+	case "0":
+		return
+	default:
+		c.printError("无效选择")
+	}
+}
+
+// switchJVMPreset 切换JVM预设档位
+func (c *CLI) switchJVMPreset(config map[string]interface{}, jvm map[string]interface{}, presets map[string]interface{}) {
+	choice, err := c.readLineWithPrompt("\033[1;33m选择预设档位 (1-3): \033[0m")
+	if err != nil {
+		return
+	}
+
+	presetNum := strings.TrimSpace(choice)
+	if presetNum != "1" && presetNum != "2" && presetNum != "3" {
+		c.printError("无效的预设档位，必须是1、2或3")
+		return
+	}
+
+	jvm["preset"] = float64([]int{1, 2, 3}[presetNum[0]-'1'])
+	config["jvm"] = jvm
+
+	// 保存配置
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		c.printError("配置序列化失败")
+		return
+	}
+
+	if err := os.WriteFile("configs/app_config.json", data, 0644); err != nil {
+		c.printError("保存配置文件失败")
+		return
+	}
+
+	c.printSuccess(fmt.Sprintf("JVM预设已切换到档位 %s", presetNum))
+	c.printInfo("重启Java应用后生效")
+}
+
+// setJVMCustomOpts 设置自定义JVM参数
+func (c *CLI) setJVMCustomOpts(config map[string]interface{}, jvm map[string]interface{}) {
+	currentOpts := ""
+	if co, ok := jvm["custom_opts"].(string); ok {
+		currentOpts = co
+	}
+
+	fmt.Printf("当前自定义参数: \033[1;36m%s\033[0m\n", currentOpts)
+	fmt.Println("示例: -XX:+UseZGC -Dspring.profiles.active=prod")
+
+	newOpts, err := c.readLineWithPrompt("\033[1;33m新的自定义参数 (留空清除): \033[0m")
+	if err != nil {
+		return
+	}
+
+	jvm["custom_opts"] = strings.TrimSpace(newOpts)
+	config["jvm"] = jvm
+
+	// 保存配置
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		c.printError("配置序列化失败")
+		return
+	}
+
+	if err := os.WriteFile("configs/app_config.json", data, 0644); err != nil {
+		c.printError("保存配置文件失败")
+		return
+	}
+
+	c.printSuccess("自定义JVM参数已更新")
+	c.printInfo("重启Java应用后生效")
+}
+
+// showJVMDetail 显示JVM详细配置
+func (c *CLI) showJVMDetail(jvm map[string]interface{}) {
+	fmt.Println("\n\033[1;33mJVM详细配置:\033[0m")
+	fmt.Println(strings.Repeat("-", 60))
+
+	currentPreset := int(jvm["preset"].(float64))
+	fmt.Printf("当前预设: %d\n", currentPreset)
+
+	customOpts := ""
+	if co, ok := jvm["custom_opts"].(string); ok && co != "" {
+		customOpts = co
+		fmt.Printf("自定义参数: %s\n", customOpts)
+	}
+
+	presets, ok := jvm["presets"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	fmt.Println("\n预设详情:")
+	for i := 1; i <= 3; i++ {
+		key := fmt.Sprintf("%d", i)
+		if preset, ok := presets[key].(map[string]interface{}); ok {
+			name := preset["name"].(string)
+			xms := preset["xms"].(string)
+			xmx := preset["xmx"].(string)
+			metaspace := preset["metaspace_size"].(string)
+			maxMetaspace := preset["max_metaspace_size"].(string)
+			gcThreads := int(preset["gc_threads"].(float64))
+			parallelGC := int(preset["parallel_gc_threads"].(float64))
+
+			mark := ""
+			if i == currentPreset {
+				mark = " ← 当前"
+			}
+
+			fmt.Printf("\n%d. %s%s\n", i, name, mark)
+			fmt.Printf("   堆内存: -Xms%s -Xmx%s\n", xms, xmx)
+			fmt.Printf("   元空间: -XX:MetaspaceSize=%s -XX:MaxMetaspaceSize=%s\n", metaspace, maxMetaspace)
+			fmt.Printf("   GC线程: -XX:ParallelGCThreads=%d -XX:ConcGCThreads=%d\n", parallelGC, gcThreads)
+		}
+	}
+
+	fmt.Println(strings.Repeat("-", 60))
+}
+
 // MonitorMode 监控模式
 func (c *CLI) MonitorMode() {
-	fmt.Println("\n\033[1;34m══�?监控模式 ═══\033[0m")
-	fmt.Println("�?Ctrl+C 退出监控\n")
+	fmt.Println("\n\033[1;34m═══ 监控模式 ═══\033[0m")
+	fmt.Println("按 Ctrl+C 退出监控\n")
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -389,7 +582,7 @@ func (c *CLI) MonitorMode() {
 		select {
 		case <-ticker.C:
 			c.clearScreen()
-			fmt.Println("\033[1;34m══�?实时监控 ═══\033[0m")
+			fmt.Println("\033[1;34m═══ 实时监控 ═══\033[0m")
 			fmt.Printf("更新时间: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 			c.ShowDetailedStatus()
 		}
