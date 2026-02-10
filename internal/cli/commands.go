@@ -394,8 +394,25 @@ func (c *CLI) JVMConfig() {
 
 	jvm, ok := config["jvm"].(map[string]interface{})
 	if !ok {
-		c.printError("JVM配置不存在")
-		return
+		// JVM配置不存在，自动创建默认配置
+		c.printWarning("JVM配置不存在，正在创建默认配置...")
+		jvm = createDefaultJVMConfig()
+		config["jvm"] = jvm
+
+		// 保存配置
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			c.printError("配置序列化失败")
+			return
+		}
+
+		if err := os.WriteFile(configFile, data, 0644); err != nil {
+			c.printError("保存配置文件失败")
+			return
+		}
+
+		c.printSuccess("已创建默认JVM配置（档位2: 3核4G）")
+		fmt.Println()
 	}
 
 	// 显示当前配置
@@ -568,6 +585,46 @@ func (c *CLI) showJVMDetail(jvm map[string]interface{}) {
 	}
 
 	fmt.Println(strings.Repeat("-", 60))
+}
+
+// createDefaultJVMConfig 创建默认JVM配置
+func createDefaultJVMConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"preset":      float64(2),
+		"custom_opts": "",
+		"presets": map[string]interface{}{
+			"1": map[string]interface{}{
+				"name":                "1核2G",
+				"description":         "1核CPU，2G内存",
+				"xms":                 "512m",
+				"xmx":                 "1g",
+				"metaspace_size":      "128m",
+				"max_metaspace_size":  "256m",
+				"gc_threads":          float64(1),
+				"parallel_gc_threads": float64(1),
+			},
+			"2": map[string]interface{}{
+				"name":                "3核4G",
+				"description":         "3核CPU，4G内存",
+				"xms":                 "1g",
+				"xmx":                 "3g",
+				"metaspace_size":      "256m",
+				"max_metaspace_size":  "512m",
+				"gc_threads":          float64(3),
+				"parallel_gc_threads": float64(3),
+			},
+			"3": map[string]interface{}{
+				"name":                "4核8G",
+				"description":         "4核CPU，8G内存",
+				"xms":                 "2g",
+				"xmx":                 "6g",
+				"metaspace_size":      "256m",
+				"max_metaspace_size":  "512m",
+				"gc_threads":          float64(4),
+				"parallel_gc_threads": float64(4),
+			},
+		},
+	}
 }
 
 // MonitorMode 监控模式
