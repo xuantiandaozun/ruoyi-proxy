@@ -6,9 +6,9 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey)](https://github.com)
 
-一个功能完整的蓝绿部署代理服务器，支持零停机部署、HTTPS自动配置、多服务管理和文件同步。
+一个功能完整的蓝绿部署代理服务器，支持零停机部署、HTTPS自动配置、多服务管理、文件同步和 AI 智能运维。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
 
 </div>
 
@@ -21,6 +21,7 @@
 - [项目结构](#-项目结构)
 - [配置说明](#-配置说明)
 - [使用指南](#-使用指南)
+- [AI Agent 模式](#-ai-agent-模式)
 - [部署流程](#-部署流程)
 - [常见问题](#-常见问题)
 - [架构设计](#-架构设计)
@@ -65,6 +66,13 @@
 - **脚本内嵌** - 所有脚本和配置模板内嵌到可执行文件
 - **一键部署** - 只需上传一个文件即可完成部署
 - **跨平台编译** - 支持 Windows 编译 Linux 版本
+
+### 🤖 AI Agent 智能运维
+- **自然语言运维** - 用中文描述任务，AI 自动规划并执行
+- **多 LLM 支持** - 兼容 Anthropic Claude、OpenAI 及任意兼容 API（DeepSeek、Qwen、Ollama 等）
+- **文件管理** - 读取、修改、删除服务器文件，重要文件自动备份
+- **服务管理** - 安装软件包、管理 systemd 服务、执行 Shell 命令
+- **安全确认** - 写操作前展示确认框，同一轮操作只需确认一次
 
 ---
 
@@ -170,6 +178,11 @@ ruoyi-proxy/
 ├── cmd/
 │   └── proxy/          # 程序入口
 ├── internal/
+│   ├── agent/          # AI Agent 运维模块
+│   │   ├── agent.go    # ReAct 推理引擎
+│   │   ├── tools.go    # 工具集（文件/服务/Shell）
+│   │   ├── openai.go   # OpenAI 兼容 API 适配器
+│   │   └── anthropic.go# Anthropic API 适配器
 │   ├── cli/            # 交互式 CLI
 │   ├── config/         # 配置管理
 │   ├── handler/        # HTTP 处理器
@@ -297,6 +310,10 @@ ruoyi> config-edit     # 编辑配置
 ruoyi> sync-config     # 配置文件同步
 ruoyi> sync-status     # 查看同步状态
 
+# AI Agent
+ruoyi> agent           # 进入 AI 对话模式
+ruoyi> agent-config    # 配置 AI 提供商和模型
+
 # 系统管理
 ruoyi> init            # 完整初始化
 ruoyi> logs            # 查看日志
@@ -390,6 +407,154 @@ ruoyi> cert example.com
 # 每月 1 号凌晨 2 点自动续期
 0 2 1 * * /opt/ruoyi-proxy/scripts/https.sh example.com >> /var/log/cert-renewal.log 2>&1
 ```
+
+---
+
+## 🤖 AI Agent 模式
+
+AI Agent 模式让你用自然语言与服务器交互，无需记忆复杂命令。Agent 内置 ReAct（Reason + Act）推理引擎，会自动规划步骤、调用工具、观察结果，直到完成任务。
+
+### 架构总览
+
+```
+用户（自然语言） → AI Agent（推理引擎）→ 工具调用 → 服务器操作
+                         ↑
+                  LLM API（Claude / OpenAI / 本地模型）
+```
+
+Agent 了解当前服务器的真实架构：
+
+```
+外部请求 → Nginx(:80/:443) → Ruoyi Proxy(:8000) → Java 应用(:8080/:8081)
+```
+
+### 快速开始
+
+```bash
+# 第一步：配置 AI 提供商
+ruoyi> agent-config
+
+# 第二步：进入 Agent 模式
+ruoyi> agent
+
+# 开始对话
+🤖 你: 查看一下 nginx 配置文件
+🤖 你: 帮我把 /etc/nginx/conf.d/default.conf 的超时时间改成 60s
+🤖 你: 安装 htop 并检查当前系统负载
+```
+
+### 配置 AI 提供商
+
+执行 `agent-config` 后，按提示填写以下信息：
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| **provider** | LLM 提供商类型 | `anthropic` / `openai` |
+| **api_key** | API 密钥 | `sk-...` |
+| **base_url** | API 地址（可选） | `https://api.deepseek.com` |
+| **model** | 使用的模型 | `claude-opus-4-5` |
+| **max_tokens** | 最大输出 Token | `8096` |
+| **timeout** | 请求超时（秒） | `120` |
+
+**支持的 LLM 提供商：**
+
+```bash
+# Anthropic Claude（推荐）
+provider:  anthropic
+base_url:  https://api.anthropic.com
+model:     claude-opus-4-5
+
+# OpenAI
+provider:  openai
+base_url:  https://api.openai.com
+model:     gpt-4o
+
+# DeepSeek（OpenAI 兼容）
+provider:  openai
+base_url:  https://api.deepseek.com
+model:     deepseek-chat
+
+# Ollama 本地模型
+provider:  openai
+base_url:  http://localhost:11434/v1
+model:     qwen2.5:14b
+api_key:   ollama
+```
+
+配置保存在 `~/.ruoyi-agent.json`，下次启动自动加载。
+
+### 内置工具列表
+
+Agent 可以调用以下工具（无需手动操作）：
+
+#### 📂 文件操作
+
+| 工具 | 说明 | 是否需要确认 |
+|------|------|:----------:|
+| `read_file` | 读取文件内容 | ❌ |
+| `list_directory` | 列出目录内容 | ❌ |
+| `write_file` | 写入/修改文件 | ✅ |
+| `delete_file` | 删除文件（支持批量） | ✅ |
+
+**自动备份**：修改或删除以下类型的重要文件时，会自动备份到 `~/.ruoyi-backup/<时间戳>/`：
+
+`.conf` `.cfg` `.json` `.yaml` `.yml` `.xml` `.properties` `.env` `.ini` `.toml` `.sh` `.pem` `.crt` `.key`
+
+#### ⚙️ 系统管理
+
+| 工具 | 说明 | 是否需要确认 |
+|------|------|:----------:|
+| `run_shell` | 执行 Shell 命令 | ✅（查询命令自动跳过）|
+| `install_package` | 安装软件包（自动识别发行版） | ✅ |
+| `manage_systemd` | 管理 systemd 服务 | ✅ |
+| `systemd_info` | 查询服务状态 | ❌ |
+
+**自动识别包管理器**：apt-get → dnf → yum → pacman → apk → zypper，无需关心 Linux 发行版差异。
+
+**只读命令自动放行**（不弹确认框）：
+`ls`、`cat`、`pwd`、`echo`、`df`、`du`、`ps`、`top`、`free`、`uname`、`whoami`、`id`、`date`、`uptime`、`netstat`、`ss`、`ip`、`nginx -t`、`systemctl status`、`journalctl` 等。
+
+### 确认机制
+
+为防止误操作，写操作会弹出确认框：
+
+```
+╭──────────────────────────────────────╮
+│ ⚠  即将执行写操作                     │
+│ 工具: write_file                      │
+│ 参数: {"path":"/etc/nginx/nginx.conf"}│
+│                                      │
+│ 输入 y 确认，其他取消                  │
+╰──────────────────────────────────────╯
+```
+
+**一轮确认机制**：同一次对话中，一旦用户确认，后续工具调用自动获得授权，无需重复确认。
+
+**提前授权**：如果用户消息本身就是明确的确认意图（如「确认」「好的」「执行」「ok」等），将自动跳过确认框。
+
+### 使用示例
+
+```bash
+# 查看服务状态
+🤖 你: 帮我看看 nginx 服务是否正常，并显示最近的错误日志
+
+# 修改配置文件
+🤖 你: 把 /etc/nginx/conf.d/ruoyi.conf 的 proxy_read_timeout 改成 120
+
+# 批量删除
+🤖 你: 删掉这些临时文件：/tmp/a.log /tmp/b.log /tmp/c.log
+     # ← 只需确认一次，Agent 批量处理
+
+# 安装软件
+🤖 你: 安装 vim 和 htop
+
+# 部署操作
+🤖 你: 帮我检查蓝绿两个环境的健康状态，然后把流量切到健康的那个
+```
+
+### 自动续跑
+
+对于复杂任务，Agent 最多执行 **30 轮推理**，若仍未完成会自动注入续跑消息继续工作（最多续跑 5 次），合计最高 **150 轮**，确保长任务不中断。
 
 ---
 
