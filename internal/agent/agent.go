@@ -14,12 +14,13 @@ const (
 
 // Agent AI 对话代理，实现 ReAct 循环
 type Agent struct {
-	provider   Provider
-	executor   *ToolExecutor
-	ctx        *ContextManager
-	aiCfg      AIConfig
-	execCtx    ExecContext
-	lastInput  string // 用户最后一条消息，用于判断是否已提前确认
+	provider     Provider
+	executor     *ToolExecutor
+	ctx          *ContextManager
+	aiCfg        AIConfig
+	execCtx      ExecContext
+	lastInput    string // 用户最后一条消息，用于判断是否已提前确认
+	turnApproved bool   // 当前用户轮次是否已批准写操作（一次批准覆盖整轮）
 	// 回调函数（由 CLI 注入）
 	confirm   func(prompt string) bool           // 写操作确认
 	readInput func(prompt string) (string, error) // 读用户输入
@@ -87,7 +88,8 @@ func (a *Agent) Run() {
 			continue
 		}
 
-		a.lastInput = input // 记录用户最后一条消息，供写操作确认使用
+		a.lastInput = input    // 记录用户最后一条消息，供写操作确认使用
+		a.turnApproved = false // 新用户轮次，重置批准状态
 		a.ctx.Add(Message{Role: "user", Content: input})
 		if err := a.runReAct(); err != nil {
 			a.print(fmt.Sprintf("\n\033[1;31m✗ 错误: %v\033[0m\n", err))
@@ -187,24 +189,26 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 
 	// 写操作需要确认
 	if toolDef != nil && !toolDef.ReadOnly {
-		fmt.Println()
-		fmt.Println("\033[1;33m┌────────────────────────────────────┐\033[0m")
-		fmt.Printf("\033[1;33m│  ⚠  即将执行写操作                   │\033[0m\n")
-		fmt.Printf("\033[1;33m│  工具: %-30s│\033[0m\n", tc.Name)
-		if argsDisplay != "" {
-			fmt.Printf("\033[1;33m│  参数: %-30s│\033[0m\n", argsDisplay)
-		}
-		fmt.Println("\033[1;33m└────────────────────────────────────┘\033[0m")
-
-		// 用户最后一条消息本身是确认词，自动批准
-		if isStandaloneAffirmative(a.lastInput) {
-			fmt.Printf("\033[1;32m✓ 已根据您的指令自动确认\033[0m\n")
+		// 情况1：用户消息本身是确认词，或本轮次已手动批准过 → 静默自动确认
+		if isStandaloneAffirmative(a.lastInput) || a.turnApproved {
+			fmt.Printf("\033[1;32m  ✓ 自动确认（已获得授权）\033[0m\n")
 		} else {
-			// 需要用户交互确认
+			// 情况2：需要用户手动确认 → 弹出确认框
+			fmt.Println()
+			fmt.Println("\033[1;33m┌────────────────────────────────────┐\033[0m")
+			fmt.Printf("\033[1;33m│  ⚠  即将执行写操作                   │\033[0m\n")
+			fmt.Printf("\033[1;33m│  工具: %-30s│\033[0m\n", tc.Name)
+			if argsDisplay != "" {
+				fmt.Printf("\033[1;33m│  参数: %-30s│\033[0m\n", argsDisplay)
+			}
+			fmt.Println("\033[1;33m└────────────────────────────────────┘\033[0m")
 			fmt.Printf("\033[1;33m▶ 直接按 Enter 确认执行，输入 n 取消: \033[0m")
+
 			if !a.confirm("") {
 				return "用户取消了此操作", nil
 			}
+			// 手动确认后，本轮次剩余写操作均自动放行
+			a.turnApproved = true
 		}
 	}
 
@@ -295,6 +299,13 @@ func (a *Agent) defaultSystemPrompt() string {
 - 重要配置文件写入或删除前会自动备份，可放心操作
 - 修改 Nginx 配置后，应主动用 run_shell 执行 nginx -t 验证，再 manage_systemd reload nginx
 - 工具结果较长时，提炼关键信息回复；遇到错误，分析原因并提供解决方案
+
+## 批量操作规范（重要）
+- 需要删除多个文件时，**必须一次性**调用 delete_file 并传入 paths 数组，不要多次调用
+  示例：{"paths": ["/path/a", "/path/b", "/path/c"]}
+- 需要对多个文件做相似操作时，优先用 run_shell 组合命令一次完成
+  示例：rm -f file1 file2 file3 / cp -r src1 src2 dst/
+- 绝对不要将一个逻辑操作拆分成多次工具调用，用户只需确认一次
 
 ## 回复风格
 - 使用中文，简洁明了

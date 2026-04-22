@@ -204,17 +204,22 @@ var AllTools = []ToolDef{
 	},
 	{
 		Name:        "delete_file",
-		Description: "删除服务器文件或空目录。重要文件删除前会自动备份到 ~/.ruoyi-backup/。需要用户确认",
+		Description: "删除服务器文件或空目录。支持同时删除多个文件（传 paths 数组）。重要文件删除前自动备份到 ~/.ruoyi-backup/。需要用户确认",
 		ReadOnly:    false,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "要删除的文件路径",
+					"description": "要删除的单个文件路径（与 paths 二选一）",
+				},
+				"paths": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "要批量删除的文件路径列表（推荐用于多文件场景）",
 				},
 			},
-			"required": []string{"path"},
+			"required": []string{},
 		},
 	},
 	{
@@ -364,8 +369,19 @@ func (e *ToolExecutor) Execute(name, argsJSON string) (string, error) {
 		appendMode, _ := args["append"].(bool)
 		return e.writeFile(path, content, appendMode)
 	case "delete_file":
-		path, _ := args["path"].(string)
-		return e.deleteFile(path)
+		// 支持单路径（path）或批量路径（paths 数组）
+		var paths []string
+		if v, ok := args["paths"].([]interface{}); ok {
+			for _, p := range v {
+				if s, ok := p.(string); ok && s != "" {
+					paths = append(paths, s)
+				}
+			}
+		}
+		if singlePath, ok := args["path"].(string); ok && singlePath != "" {
+			paths = append(paths, singlePath)
+		}
+		return e.deleteFiles(paths)
 	case "install_package":
 		var packages []string
 		if v, ok := args["packages"].([]interface{}); ok {
@@ -844,40 +860,66 @@ func (e *ToolExecutor) writeFile(path, content string, appendMode bool) (string,
 	return result, nil
 }
 
-func (e *ToolExecutor) deleteFile(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("请提供文件路径")
-	}
-	path = expandHome(path)
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("文件不存在: %v", err)
+func (e *ToolExecutor) deleteFiles(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("请提供要删除的文件路径（path 或 paths）")
 	}
 
-	backed := false
-	if isImportantFile(path) && !info.IsDir() {
-		if bpath, err := backupFile(path); err == nil {
-			backed = true
-			_ = bpath
+	var sb strings.Builder
+	backedUp := []string{}
+	failed := []string{}
+	deleted := []string{}
+
+	for _, path := range paths {
+		path = expandHome(strings.TrimSpace(path))
+		if path == "" {
+			continue
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s（不存在）", path))
+			continue
+		}
+
+		// 重要文件先备份
+		if isImportantFile(path) && !info.IsDir() {
+			if _, err := backupFile(path); err == nil {
+				backedUp = append(backedUp, path)
+			}
+		}
+
+		// 执行删除
+		if info.IsDir() {
+			err = os.Remove(path) // 只删空目录
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s（%v）", path, err))
+		} else {
+			deleted = append(deleted, path)
 		}
 	}
 
-	if info.IsDir() {
-		if err := os.Remove(path); err != nil {
-			return "", fmt.Errorf("删除目录失败（目录非空？）: %v", err)
+	// 汇总结果
+	if len(deleted) > 0 {
+		sb.WriteString(fmt.Sprintf("✓ 已删除 %d 个文件:\n", len(deleted)))
+		for _, p := range deleted {
+			sb.WriteString(fmt.Sprintf("  - %s\n", p))
 		}
-	} else {
-		if err := os.Remove(path); err != nil {
-			return "", fmt.Errorf("删除失败: %v", err)
+	}
+	if len(backedUp) > 0 {
+		sb.WriteString(fmt.Sprintf("\n已自动备份 %d 个重要文件到 ~/.ruoyi-backup/\n", len(backedUp)))
+	}
+	if len(failed) > 0 {
+		sb.WriteString(fmt.Sprintf("\n✗ %d 个文件删除失败:\n", len(failed)))
+		for _, f := range failed {
+			sb.WriteString(fmt.Sprintf("  - %s\n", f))
 		}
 	}
 
-	result := fmt.Sprintf("✓ 已删除: %s", path)
-	if backed {
-		result += "\n已自动备份到 ~/.ruoyi-backup/"
-	}
-	return result, nil
+	return strings.TrimSpace(sb.String()), nil
 }
 
 func (e *ToolExecutor) installPackage(packages []string, updateFirst bool) (string, error) {
