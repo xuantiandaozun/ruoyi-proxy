@@ -215,8 +215,16 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 	}
 	fmt.Println()
 
-	// 写操作需要确认
-	if toolDef != nil && !toolDef.ReadOnly {
+	// 判断本次调用是否真正需要确认：
+	// - ToolDef.ReadOnly=true  → 无需确认
+	// - run_shell 但命令是只读性质 → 无需确认
+	// - 其他写操作 → 需要确认
+	needsConfirm := toolDef != nil && !toolDef.ReadOnly
+	if needsConfirm && tc.Name == "run_shell" && isReadOnlyShellCmd(tc.Arguments) {
+		needsConfirm = false
+	}
+
+	if needsConfirm {
 		// 情况1：用户消息本身是确认词，或本轮次已手动批准过 → 静默自动确认
 		if isStandaloneAffirmative(a.lastInput) || a.turnApproved {
 			fmt.Printf("\033[1;32m  ✓ 自动确认（已获得授权）\033[0m\n")
@@ -346,6 +354,76 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// isReadOnlyShellCmd 判断 run_shell 的 arguments JSON 中的命令是否为只读操作
+// 只读命令直接执行，不弹确认框
+func isReadOnlyShellCmd(argsJSON string) bool {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	cmd := strings.TrimSpace(fmt.Sprintf("%v", args["command"]))
+	if cmd == "" {
+		return false
+	}
+
+	// 包含这些特征 → 明确是写操作，不跳过确认
+	writeSignals := []string{
+		">", ">>",              // 重定向写入
+		"rm ", "rmdir ",        // 删除
+		"mv ", "cp ",           // 移动/复制（可能覆盖）
+		"chmod ", "chown ",     // 权限修改
+		"dd ", "mkfs", "fdisk", // 磁盘操作
+		"systemctl ", "service ", // 服务控制（由 manage_systemd 负责）
+		"apt", "yum", "dnf", "pacman", "apk", "pip", "npm install", // 安装
+		"curl -o", "wget -O", "wget -P", // 下载写入
+		"tar -x", "unzip", "gunzip",     // 解压
+		"kill ", "pkill ", "killall ",   // 进程终止
+		"passwd ", "useradd ", "userdel", // 用户管理
+		"crontab ",                       // 定时任务修改
+		"iptables ", "ufw ",              // 防火墙修改
+		"mount ", "umount ",              // 挂载
+		"sed -i", "awk '",               // 原地修改
+	}
+	for _, sig := range writeSignals {
+		if strings.Contains(cmd, sig) {
+			return false
+		}
+	}
+
+	// 这些命令前缀 → 明确是只读
+	readOnlyPrefixes := []string{
+		"nginx -t", "nginx -T",             // nginx 配置检测
+		"ls", "ll", "dir",                  // 目录列表
+		"cat ", "less ", "more ", "head ", "tail ", // 文件查看
+		"grep ", "awk ", "sed -n", "sort ", "uniq ", "wc ", // 文本处理（不修改）
+		"find ", "locate ",                 // 文件查找
+		"df ", "du ", "lsblk ",             // 磁盘信息
+		"ps ", "top ", "htop ", "uptime",   // 进程/负载
+		"free ", "vmstat ", "iostat ",      // 内存/IO
+		"netstat", "ss ", "lsof ",          // 网络连接
+		"ping ", "traceroute ", "nslookup ", "dig ", "curl -s", "curl -I", // 网络测试
+		"echo ", "printf ",                 // 输出（不写文件时）
+		"date", "hostname", "uname",        // 系统信息
+		"whoami", "id ", "groups ",         // 用户信息
+		"which ", "type ", "whereis ",      // 命令查找
+		"stat ", "file ", "md5sum ", "sha256sum ", // 文件信息
+		"env", "printenv", "set ",          // 环境变量查看
+		"java -version", "java --version",  // 版本信息
+		"python", "node -v", "go version",  // 运行时版本
+		"systemctl status", "systemctl is-active", "systemctl is-enabled", // 状态查询（只读）
+		"journalctl ",                      // 日志查看
+		"rpm -q", "dpkg -l", "apt list",    // 包查询
+	}
+	lowerCmd := strings.ToLower(cmd)
+	for _, prefix := range readOnlyPrefixes {
+		if strings.HasPrefix(lowerCmd, strings.ToLower(prefix)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // isStandaloneAffirmative 判断用户消息是否是独立的确认词
