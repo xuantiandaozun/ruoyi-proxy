@@ -1,4 +1,4 @@
-# Ruoyi Proxy - 蓝绿部署代理服务器
+# Ruoyi Proxy - Blue-Green Deployment Proxy Server
 
 <div align="center">
 
@@ -6,211 +6,211 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey)](https://github.com)
 
-一个功能完整的蓝绿部署代理服务器，支持零停机部署、HTTPS自动配置、多服务管理、文件同步和 AI 智能运维。
+A full-featured blue-green deployment proxy server with zero-downtime deployments, automatic HTTPS, multi-service management, file synchronization, and AI-powered operations.
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
+[Features](#-features) • [Quick Start](#-quick-start) • [Usage Guide](#-usage-guide) • [AI Agent Mode](#-ai-agent-mode) • [Architecture](#-architecture) • [Contributing](#-contributing)
+
+**[🇨🇳 中文文档](README_CN.md)**
 
 </div>
 
 ---
 
-## 📋 目录
+## 📋 Table of Contents
 
-- [功能特性](#-功能特性)
-- [快速开始](#-快速开始)
-- [项目结构](#-项目结构)
-- [配置说明](#-配置说明)
-- [使用指南](#-使用指南)
-- [AI Agent 模式](#-ai-agent-模式)
-- [部署流程](#-部署流程)
-- [常见问题](#-常见问题)
-- [架构设计](#-架构设计)
-- [贡献指南](#-贡献)
-- [许可证](#-许可证)
-
----
-
-## ✨ 功能特性
-
-### 🔄 蓝绿部署
-- **零停机部署** - 蓝绿环境无缝切换，用户无感知
-- **一键回滚** - 出现问题立即切换回旧版本
-- **健康检查** - 自动检测服务健康状态
-- **长连接支持** - 支持 SSE、WebSocket 等长时间请求
-
-### 🎯 多服务管理
-- **多服务支持** - 管理多个 Java 应用服务
-- **服务切换** - 快速切换当前操作的服务
-- **独立配置** - 每个服务独立的端口和 JAR 文件配置
-- **批量操作** - 支持批量启动、停止、部署
-
-### 🔐 HTTPS 自动化
-- **自动申请证书** - 集成 Let's Encrypt，一键申请免费 SSL 证书
-- **自动续期** - 支持证书自动续期配置
-- **一键开关** - HTTPS 模式一键开启/关闭
-- **HTTP 重定向** - 自动配置 HTTP 到 HTTPS 重定向
-
-### 🔧 交互式 CLI
-- **友好界面** - 彩色输出，命令提示，操作简单
-- **实时监控** - 实时查看服务状态和日志
-- **交互确认** - 危险操作需要确认，避免误操作
-- **命令补全** - 支持 Tab 键命令补全
-
-### 🌐 Nginx 集成
-- **自动配置** - 自动生成 Nginx 配置文件
-- **静态文件服务** - 支持 Vue 等前端应用托管
-- **反向代理** - 自动配置反向代理规则
-- **配置模板** - 提供 HTTP 和 HTTPS 配置模板
-
-### 📦 单文件部署
-- **脚本内嵌** - 所有脚本和配置模板内嵌到可执行文件
-- **一键部署** - 只需上传一个文件即可完成部署
-- **跨平台编译** - 支持 Windows 编译 Linux 版本
-
-### 🤖 AI Agent 智能运维
-- **自然语言运维** - 用中文描述任务，AI 自动规划并执行
-- **多 LLM 支持** - 兼容 Anthropic Claude、OpenAI 及任意兼容 API（DeepSeek、Qwen、Ollama 等）
-- **文件管理** - 读取、修改、删除服务器文件，重要文件自动备份
-- **服务管理** - 安装软件包、管理 systemd 服务、执行 Shell 命令
-- **安全确认** - 写操作前展示确认框，同一轮操作只需确认一次
+- [Features](#-features)
+- [Quick Start](#-quick-start)
+- [Project Structure](#-project-structure)
+- [Configuration](#-configuration)
+- [Usage Guide](#-usage-guide)
+- [AI Agent Mode](#-ai-agent-mode)
+- [Deployment Workflow](#-deployment-workflow)
+- [Troubleshooting](#-troubleshooting)
+- [Architecture](#-architecture)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
-## 🚀 快速开始
+## ✨ Features
 
-### 环境要求
+### 🔄 Blue-Green Deployment
+- **Zero-downtime** - Seamless environment switching, invisible to end users
+- **One-click rollback** - Instantly revert to the previous version when issues arise
+- **Health checks** - Automatic service health detection before switching
+- **Long-connection support** - Handles SSE, WebSocket, and other long-lived requests
 
-- **编译环境**：Go 1.24+（仅编译时需要）
-- **运行环境**：Linux/Unix 系统
-- **可选依赖**：Nginx、Docker、Redis、Java 17
+### 🎯 Multi-Service Management
+- **Multiple services** - Manage multiple Java application services simultaneously
+- **Quick switching** - Switch the active service with a single command
+- **Independent config** - Per-service port and JAR file configuration
+- **Batch operations** - Start, stop, and deploy multiple services at once
 
-### 方式一：单文件部署（推荐）⭐
+### 🔐 Automated HTTPS
+- **Auto certificate** - Integrated Let's Encrypt for one-click free SSL certificates
+- **Auto renewal** - Built-in support for certificate auto-renewal
+- **One-click toggle** - Enable/disable HTTPS mode instantly
+- **HTTP redirect** - Automatic HTTP → HTTPS redirect configuration
 
-这是最简单的部署方式，只需上传一个可执行文件！
+### 🔧 Interactive CLI
+- **Friendly interface** - Color output, command hints, simple operations
+- **Real-time monitoring** - Live service status and log streaming
+- **Confirmation prompts** - Dangerous operations require explicit confirmation
+- **Tab completion** - Shell-style command auto-completion
+
+### 🌐 Nginx Integration
+- **Auto configuration** - Automatically generates Nginx config files
+- **Static file serving** - Host Vue and other frontend applications
+- **Reverse proxy** - Automatic reverse proxy rule configuration
+- **Config templates** - Ready-made HTTP and HTTPS templates
+
+### 📦 Single-File Deployment
+- **Embedded scripts** - All scripts and templates bundled into the binary
+- **One-file deploy** - Upload a single executable to get started
+- **Cross-platform build** - Compile Linux binaries from Windows
+
+### 🤖 AI Agent Operations
+- **Natural language** - Describe tasks in plain English; AI plans and executes them
+- **Multi-LLM support** - Works with Anthropic Claude, OpenAI, and any compatible API (DeepSeek, Qwen, Ollama, etc.)
+- **File management** - Read, modify, and delete server files with automatic backup for important files
+- **Service management** - Install packages, manage systemd services, run shell commands
+- **Safe confirmation** - Write operations require confirmation; one approval covers an entire turn
+
+---
+
+## 🚀 Quick Start
+
+### Requirements
+
+- **Build environment**: Go 1.24+ (only needed when compiling)
+- **Runtime**: Linux/Unix system
+- **Optional dependencies**: Nginx, Docker, Redis, Java 17
+
+### Option 1: Single-File Deploy (Recommended) ⭐
+
+The simplest way to get started — just upload one binary!
 
 ```bash
-# 1. 在本地编译 Linux 版本（Windows 用户）
+# 1. Build the Linux binary locally (Windows users)
 build.bat
 
-# 或者使用 Make（Linux/Mac 用户）
+# Or with Make (Linux/Mac users)
 make linux
 
-# 2. 上传到服务器（只需一个文件！）
+# 2. Upload to your server (just one file!)
 scp bin/ruoyi-proxy-linux user@server:/opt/ruoyi-proxy/
 
-# 3. SSH 到服务器并添加执行权限
+# 3. SSH into the server and make it executable
 ssh user@server
 cd /opt/ruoyi-proxy
 chmod +x ruoyi-proxy-linux
 
-# 4. 启动交互式 CLI
+# 4. Start the interactive CLI
 ./ruoyi-proxy-linux cli
 
-# 5. 执行初始化向导
+# 5. Run the initialization wizard
 ruoyi> init
 ```
 
-初始化向导会引导你完成以下配置：
-- ✅ 安装 Nginx（必需）
-- 🐳 安装 Docker（可选）
-- 📦 安装 Redis（可选）
-- ☕ 安装 Java 17（可选）
-- ⚙️ 配置代理程序（端口、目标地址）
-- 🌐 配置域名和 HTTPS
-- 🔄 配置文件同步（可选）
+The init wizard will guide you through:
+- ✅ Installing Nginx (required)
+- 🐳 Installing Docker (optional)
+- 📦 Installing Redis (optional)
+- ☕ Installing Java 17 (optional)
+- ⚙️ Configuring the proxy (ports, target addresses)
+- 🌐 Setting up domain and HTTPS
+- 🔄 Configuring file sync (optional)
 
-### 方式二：本地开发
+### Option 2: Local Development
 
 ```bash
-# 克隆项目
+# Clone the repo
 git clone https://github.com/xuantiandaozun/ruoyi-proxy.git
 cd ruoyi-proxy
 
-# 安装依赖
+# Install dependencies
 make install
 
-# 开发模式运行
+# Run in dev mode
 make run
 
-# 或编译后运行
+# Or build then run
 make build
 ./bin/ruoyi-proxy
 
-# 启动交互式 CLI
+# Start the interactive CLI
 make cli
 ```
 
-### 快速测试
+### Quick Test
 
-#### 使用交互式 CLI（推荐）
+#### Using the interactive CLI (recommended)
 
 ```bash
-# 启动 CLI
 ./bin/ruoyi-proxy cli
 
-# 常用命令
-ruoyi> status      # 查看服务状态
-ruoyi> deploy      # 执行蓝绿部署
-ruoyi> switch      # 切换环境
-ruoyi> logs        # 查看日志
-ruoyi> help        # 查看所有命令
+ruoyi> status      # View service status
+ruoyi> deploy      # Run blue-green deployment
+ruoyi> switch      # Switch environments
+ruoyi> logs        # View logs
+ruoyi> help        # Show all commands
 ```
 
-#### 使用 HTTP API
+#### Using the HTTP API
 
 ```bash
-# 查看状态
+# Check status
 curl http://localhost:8001/status
 
-# 切换到绿色环境
+# Switch to green environment
 curl -X POST "http://localhost:8001/switch?env=green"
 
-# 健康检查
+# Health check
 curl http://localhost:8001/health
 ```
 
 ---
 
-## 📁 项目结构
+## 📁 Project Structure
 
 ```
 ruoyi-proxy/
 ├── cmd/
-│   └── proxy/          # 程序入口
+│   └── proxy/          # Program entry point
 ├── internal/
-│   ├── agent/          # AI Agent 运维模块
-│   │   ├── agent.go    # ReAct 推理引擎
-│   │   ├── tools.go    # 工具集（文件/服务/Shell）
-│   │   ├── openai.go   # OpenAI 兼容 API 适配器
-│   │   └── anthropic.go# Anthropic API 适配器
-│   ├── cli/            # 交互式 CLI
-│   ├── config/         # 配置管理
-│   ├── handler/        # HTTP 处理器
-│   ├── proxy/          # 反向代理核心
-│   └── sync/           # 文件同步
-├── configs/            # 配置文件目录
-│   ├── app_config.json           # 应用配置
-│   ├── proxy_config.json         # 代理配置
-│   ├── nginx.conf.template       # Nginx HTTP 模板
-│   └── nginx-https.conf.template # Nginx HTTPS 模板
-├── scripts/            # Shell 脚本（会被嵌入）
-│   ├── init.sh         # 初始化脚本
-│   ├── service.sh      # 服务管理
-│   ├── https.sh        # HTTPS 管理
-│   ├── deploy.sh       # 部署脚本
-│   └── sync.sh         # 文件同步
-├── bin/                # 编译输出目录
-├── Makefile            # Make 构建脚本
-├── build.bat           # Windows 构建脚本
-├── go.mod              # Go 模块定义
-└── README.md           # 项目文档
+│   ├── agent/          # AI Agent operations module
+│   │   ├── agent.go    # ReAct reasoning engine
+│   │   ├── tools.go    # Tool set (file / service / shell)
+│   │   ├── openai.go   # OpenAI-compatible API adapter
+│   │   └── anthropic.go# Anthropic API adapter
+│   ├── cli/            # Interactive CLI
+│   ├── config/         # Configuration management
+│   ├── handler/        # HTTP handlers
+│   ├── proxy/          # Reverse proxy core
+│   └── sync/           # File synchronization
+├── configs/            # Configuration files
+│   ├── app_config.json           # Application config
+│   ├── proxy_config.json         # Proxy config
+│   ├── nginx.conf.template       # Nginx HTTP template
+│   └── nginx-https.conf.template # Nginx HTTPS template
+├── scripts/            # Shell scripts (embedded in binary)
+│   ├── init.sh         # Initialization script
+│   ├── service.sh      # Service management
+│   ├── https.sh        # HTTPS management
+│   ├── deploy.sh       # Deployment script
+│   └── sync.sh         # File synchronization
+├── bin/                # Build output directory
+├── Makefile            # Make build script
+├── build.bat           # Windows build script
+├── go.mod              # Go module definition
+└── README.md           # Project documentation
 ```
 
 ---
 
-## ⚙️ 配置说明
+## ⚙️ Configuration
 
-### 应用配置 (configs/app_config.json)
+### Application Config (configs/app_config.json)
 
 ```json
 {
@@ -238,7 +238,7 @@ ruoyi-proxy/
 }
 ```
 
-### 代理配置 (configs/proxy_config.json)
+### Proxy Config (configs/proxy_config.json)
 
 ```json
 {
@@ -250,86 +250,86 @@ ruoyi-proxy/
 
 ---
 
-## 📖 使用指南
+## 📖 Usage Guide
 
-### 编译命令
+### Build Commands
 
-**Windows 用户：**
+**Windows:**
 ```cmd
-build.bat               # 编译 Linux 版本（推荐）
+build.bat               # Build Linux binary (recommended)
 ```
 
-**Linux/Mac 用户：**
+**Linux/Mac:**
 ```bash
-make build              # 编译当前平台
-make linux              # 编译 Linux 版本
-make run                # 开发模式运行
-make cli                # 启动交互式 CLI
-make install            # 安装依赖
-make clean              # 清理编译文件
+make build              # Build for current platform
+make linux              # Build Linux binary
+make run                # Run in dev mode
+make cli                # Start interactive CLI
+make install            # Install dependencies
+make clean              # Clean build artifacts
 ```
 
-> 💡 **提示**：修改 `scripts/` 目录下的脚本后，必须重新编译才能生效。
+> 💡 **Tip**: After modifying scripts in `scripts/`, you must rebuild for changes to take effect.
 
-### 交互式 CLI 命令
+### CLI Commands
 
 ```bash
-# 服务管理
-ruoyi> start           # 启动 Java 应用
-ruoyi> stop            # 停止 Java 应用
-ruoyi> restart         # 重启 Java 应用
-ruoyi> status          # 查看服务状态
-ruoyi> detail          # 详细状态（含健康检查）
+# Service management
+ruoyi> start           # Start Java application
+ruoyi> stop            # Stop Java application
+ruoyi> restart         # Restart Java application
+ruoyi> status          # View service status
+ruoyi> detail          # Detailed status (includes health check)
 
-# 蓝绿部署
-ruoyi> deploy          # 执行蓝绿部署
-ruoyi> switch          # 交互式切换环境
-ruoyi> rollback        # 回滚到上一个环境
+# Blue-green deployment
+ruoyi> deploy          # Run blue-green deployment
+ruoyi> switch          # Interactive environment switch
+ruoyi> rollback        # Roll back to previous environment
 
-# 代理服务
-ruoyi> proxy-start     # 启动代理服务
-ruoyi> proxy-stop      # 停止代理服务
-ruoyi> proxy-status    # 查看代理状态
+# Proxy service
+ruoyi> proxy-start     # Start proxy service
+ruoyi> proxy-stop      # Stop proxy service
+ruoyi> proxy-status    # View proxy status
 
-# 多服务管理
-ruoyi> service-add     # 添加新服务
-ruoyi> service-list    # 查看服务列表
-ruoyi> service-switch  # 切换当前服务
-ruoyi> service-remove  # 删除服务
+# Multi-service management
+ruoyi> service-add     # Add a new service
+ruoyi> service-list    # List all services
+ruoyi> service-switch  # Switch active service
+ruoyi> service-remove  # Remove a service
 
-# HTTPS 管理
-ruoyi> cert <域名>     # 申请 SSL 证书
-ruoyi> enable-https    # 开启 HTTPS
-ruoyi> disable-https   # 关闭 HTTPS
+# HTTPS management
+ruoyi> cert <domain>   # Request SSL certificate
+ruoyi> enable-https    # Enable HTTPS
+ruoyi> disable-https   # Disable HTTPS
 
-# 配置管理
-ruoyi> config          # 查看完整配置
-ruoyi> config-edit     # 编辑配置
+# Configuration
+ruoyi> config          # View full configuration
+ruoyi> config-edit     # Edit configuration
 
-# 文件同步
-ruoyi> sync-config     # 配置文件同步
-ruoyi> sync-status     # 查看同步状态
+# File synchronization
+ruoyi> sync-config     # Configure file sync
+ruoyi> sync-status     # View sync status
 
 # AI Agent
-ruoyi> agent           # 进入 AI 对话模式
-ruoyi> agent-config    # 配置 AI 提供商和模型
+ruoyi> agent           # Enter AI conversation mode
+ruoyi> agent-config    # Configure AI provider and model
 
-# 系统管理
-ruoyi> init            # 完整初始化
-ruoyi> logs            # 查看日志
-ruoyi> monitor         # 实时监控
-ruoyi> help            # 查看所有命令
-ruoyi> exit            # 退出 CLI
+# System
+ruoyi> init            # Full initialization wizard
+ruoyi> logs            # View logs
+ruoyi> monitor         # Real-time monitoring
+ruoyi> help            # Show all commands
+ruoyi> exit            # Exit CLI
 ```
 
-### 管理 API
+### Management API
 
-#### 查看状态
+#### Check Status
 ```bash
 curl http://localhost:8001/status
 ```
 
-**响应示例：**
+**Response example:**
 ```json
 {
   "status": "running",
@@ -343,16 +343,13 @@ curl http://localhost:8001/status
 }
 ```
 
-#### 切换环境
+#### Switch Environment
 ```bash
-# 切换到绿色环境
 curl -X POST "http://localhost:8001/switch?env=green"
-
-# 切换到蓝色环境
 curl -X POST "http://localhost:8001/switch?env=blue"
 ```
 
-#### 更新配置
+#### Update Config
 ```bash
 curl -X POST http://localhost:8001/config \
   -H "Content-Type: application/json" \
@@ -363,103 +360,103 @@ curl -X POST http://localhost:8001/config \
   }'
 ```
 
-### HTTPS 配置
+### HTTPS Setup
 
-#### 申请 SSL 证书
+#### Request an SSL Certificate
 
 ```bash
-# 在 CLI 中申请证书（域名需已解析到服务器）
+# Domain must already point to this server
 ruoyi> cert example.com
 ```
 
-证书会自动保存到 `/etc/nginx/cert/` 目录。
+Certificates are saved to `/etc/nginx/cert/`.
 
-#### 开启 HTTPS
+#### Enable HTTPS
 
 ```bash
 ruoyi> enable-https
 ```
 
-**自动完成的操作：**
-1. ✅ 检查 SSL 证书是否存在
-2. ✅ 切换 Nginx 配置到 HTTPS 版本
-3. ✅ 配置 HTTP 到 HTTPS 重定向
-4. ✅ 更新 `app_config.json` 配置
-5. ✅ 重载 Nginx 服务
+This automatically:
+1. ✅ Checks for an existing SSL certificate
+2. ✅ Switches Nginx config to the HTTPS version
+3. ✅ Configures HTTP → HTTPS redirect
+4. ✅ Updates `app_config.json`
+5. ✅ Reloads Nginx
 
-#### 关闭 HTTPS
+#### Disable HTTPS
 
 ```bash
 ruoyi> disable-https
 ```
 
-#### 证书续期
+#### Certificate Renewal
 
-Let's Encrypt 证书有效期为 90 天，可以手动续期：
+Let's Encrypt certificates are valid for 90 days. Renew manually:
 
 ```bash
 ruoyi> cert example.com
 ```
 
-或配置自动续期（crontab）：
+Or set up auto-renewal via crontab:
 
 ```bash
-# 每月 1 号凌晨 2 点自动续期
+# Auto-renew on the 1st of every month at 2 AM
 0 2 1 * * /opt/ruoyi-proxy/scripts/https.sh example.com >> /var/log/cert-renewal.log 2>&1
 ```
 
 ---
 
-## 🤖 AI Agent 模式
+## 🤖 AI Agent Mode
 
-AI Agent 模式让你用自然语言与服务器交互，无需记忆复杂命令。Agent 内置 ReAct（Reason + Act）推理引擎，会自动规划步骤、调用工具、观察结果，直到完成任务。
+AI Agent mode lets you interact with your server in plain English — no need to memorize commands. The Agent uses a built-in ReAct (Reason + Act) engine that automatically plans steps, calls tools, observes results, and iterates until the task is complete.
 
-### 架构总览
-
-```
-用户（自然语言） → AI Agent（推理引擎）→ 工具调用 → 服务器操作
-                         ↑
-                  LLM API（Claude / OpenAI / 本地模型）
-```
-
-Agent 了解当前服务器的真实架构：
+### Architecture Overview
 
 ```
-外部请求 → Nginx(:80/:443) → Ruoyi Proxy(:8000) → Java 应用(:8080/:8081)
+User (natural language) → AI Agent (reasoning engine) → Tool calls → Server
+                                    ↑
+                          LLM API (Claude / OpenAI / local model)
 ```
 
-### 快速开始
+The Agent understands the real server architecture:
+
+```
+External request → Nginx(:80/:443) → Ruoyi Proxy(:8000) → Java apps(:8080/:8081)
+```
+
+### Quick Start
 
 ```bash
-# 第一步：配置 AI 提供商
+# Step 1: Configure your AI provider
 ruoyi> agent-config
 
-# 第二步：进入 Agent 模式
+# Step 2: Enter Agent mode
 ruoyi> agent
 
-# 开始对话
-🤖 你: 查看一下 nginx 配置文件
-🤖 你: 帮我把 /etc/nginx/conf.d/default.conf 的超时时间改成 60s
-🤖 你: 安装 htop 并检查当前系统负载
+# Start chatting
+🤖 You: Show me the nginx config file
+🤖 You: Change the timeout in /etc/nginx/conf.d/default.conf to 60s
+🤖 You: Install htop and check current system load
 ```
 
-### 配置 AI 提供商
+### Configuring the AI Provider
 
-执行 `agent-config` 后，按提示填写以下信息：
+Run `agent-config` and fill in the following:
 
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| **provider** | LLM 提供商类型 | `anthropic` / `openai` |
-| **api_key** | API 密钥 | `sk-...` |
-| **base_url** | API 地址（可选） | `https://api.deepseek.com` |
-| **model** | 使用的模型 | `claude-opus-4-5` |
-| **max_tokens** | 最大输出 Token | `8096` |
-| **timeout** | 请求超时（秒） | `120` |
+| Field | Description | Example |
+|-------|-------------|---------|
+| **provider** | LLM provider type | `anthropic` / `openai` |
+| **api_key** | API key | `sk-...` |
+| **base_url** | API endpoint (optional) | `https://api.deepseek.com` |
+| **model** | Model to use | `claude-opus-4-5` |
+| **max_tokens** | Max output tokens | `8096` |
+| **timeout** | Request timeout (seconds) | `120` |
 
-**支持的 LLM 提供商：**
+**Supported providers:**
 
 ```bash
-# Anthropic Claude（推荐）
+# Anthropic Claude (recommended)
 provider:  anthropic
 base_url:  https://api.anthropic.com
 model:     claude-opus-4-5
@@ -469,347 +466,333 @@ provider:  openai
 base_url:  https://api.openai.com
 model:     gpt-4o
 
-# DeepSeek（OpenAI 兼容）
+# DeepSeek (OpenAI-compatible)
 provider:  openai
 base_url:  https://api.deepseek.com
 model:     deepseek-chat
 
-# Ollama 本地模型
+# Ollama (local model)
 provider:  openai
 base_url:  http://localhost:11434/v1
 model:     qwen2.5:14b
 api_key:   ollama
 ```
 
-配置保存在 `~/.ruoyi-agent.json`，下次启动自动加载。
+Config is saved to `~/.ruoyi-agent.json` and loaded automatically on next start.
 
-### 内置工具列表
+### Available Tools
 
-Agent 可以调用以下工具（无需手动操作）：
+The Agent can call these tools automatically:
 
-#### 📂 文件操作
+#### 📂 File Operations
 
-| 工具 | 说明 | 是否需要确认 |
-|------|------|:----------:|
-| `read_file` | 读取文件内容 | ❌ |
-| `list_directory` | 列出目录内容 | ❌ |
-| `write_file` | 写入/修改文件 | ✅ |
-| `delete_file` | 删除文件（支持批量） | ✅ |
+| Tool | Description | Confirmation required |
+|------|-------------|:--------------------:|
+| `read_file` | Read file contents | ❌ |
+| `list_directory` | List directory contents | ❌ |
+| `write_file` | Write / modify a file | ✅ |
+| `delete_file` | Delete files (supports batch) | ✅ |
 
-**自动备份**：修改或删除以下类型的重要文件时，会自动备份到 `~/.ruoyi-backup/<时间戳>/`：
+**Auto-backup**: When modifying or deleting important files, they are automatically backed up to `~/.ruoyi-backup/<timestamp>/`. Backed-up extensions:
 
 `.conf` `.cfg` `.json` `.yaml` `.yml` `.xml` `.properties` `.env` `.ini` `.toml` `.sh` `.pem` `.crt` `.key`
 
-#### ⚙️ 系统管理
+#### ⚙️ System Management
 
-| 工具 | 说明 | 是否需要确认 |
-|------|------|:----------:|
-| `run_shell` | 执行 Shell 命令 | ✅（查询命令自动跳过）|
-| `install_package` | 安装软件包（自动识别发行版） | ✅ |
-| `manage_systemd` | 管理 systemd 服务 | ✅ |
-| `systemd_info` | 查询服务状态 | ❌ |
+| Tool | Description | Confirmation required |
+|------|-------------|:--------------------:|
+| `run_shell` | Execute a shell command | ✅ (read-only cmds skipped) |
+| `install_package` | Install packages (auto-detects distro) | ✅ |
+| `manage_systemd` | Manage systemd services | ✅ |
+| `systemd_info` | Query service status | ❌ |
 
-**自动识别包管理器**：apt-get → dnf → yum → pacman → apk → zypper，无需关心 Linux 发行版差异。
+**Auto-detected package managers**: apt-get → dnf → yum → pacman → apk → zypper
 
-**只读命令自动放行**（不弹确认框）：
-`ls`、`cat`、`pwd`、`echo`、`df`、`du`、`ps`、`top`、`free`、`uname`、`whoami`、`id`、`date`、`uptime`、`netstat`、`ss`、`ip`、`nginx -t`、`systemctl status`、`journalctl` 等。
+**Read-only commands skip confirmation automatically**:  
+`ls`, `cat`, `pwd`, `echo`, `df`, `du`, `ps`, `top`, `free`, `uname`, `whoami`, `id`, `date`, `uptime`, `netstat`, `ss`, `ip`, `nginx -t`, `systemctl status`, `journalctl`, etc.
 
-### 确认机制
+### Confirmation Flow
 
-为防止误操作，写操作会弹出确认框：
+Write operations display a confirmation box:
 
 ```
-╭──────────────────────────────────────╮
-│ ⚠  即将执行写操作                     │
-│ 工具: write_file                      │
-│ 参数: {"path":"/etc/nginx/nginx.conf"}│
-│                                      │
-│ 输入 y 确认，其他取消                  │
-╰──────────────────────────────────────╯
+╭──────────────────────────────────────────╮
+│ ⚠  Write operation pending               │
+│ Tool: write_file                         │
+│ Args: {"path":"/etc/nginx/nginx.conf"}   │
+│                                          │
+│ Enter y to confirm, anything else cancels│
+╰──────────────────────────────────────────╯
 ```
 
-**一轮确认机制**：同一次对话中，一旦用户确认，后续工具调用自动获得授权，无需重复确认。
+**Single-turn approval**: Once you confirm in a turn, all subsequent tool calls in the same turn are automatically approved — no repeated prompts.
 
-**提前授权**：如果用户消息本身就是明确的确认意图（如「确认」「好的」「执行」「ok」等），将自动跳过确认框。
+**Pre-authorization**: If your message itself is a clear affirmative ("yes", "ok", "confirm", "go ahead", etc.), the confirmation box is skipped entirely.
 
-### 使用示例
+### Usage Examples
 
 ```bash
-# 查看服务状态
-🤖 你: 帮我看看 nginx 服务是否正常，并显示最近的错误日志
+# Check service health
+🤖 You: Is nginx running properly? Show me the recent error logs
 
-# 修改配置文件
-🤖 你: 把 /etc/nginx/conf.d/ruoyi.conf 的 proxy_read_timeout 改成 120
+# Modify a config file
+🤖 You: Set proxy_read_timeout to 120 in /etc/nginx/conf.d/ruoyi.conf
 
-# 批量删除
-🤖 你: 删掉这些临时文件：/tmp/a.log /tmp/b.log /tmp/c.log
-     # ← 只需确认一次，Agent 批量处理
+# Batch delete (one confirmation covers all)
+🤖 You: Delete these temp files: /tmp/a.log /tmp/b.log /tmp/c.log
 
-# 安装软件
-🤖 你: 安装 vim 和 htop
+# Install software
+🤖 You: Install vim and htop
 
-# 部署操作
-🤖 你: 帮我检查蓝绿两个环境的健康状态，然后把流量切到健康的那个
+# Deployment
+🤖 You: Check the health of both blue and green environments, then switch traffic to the healthy one
 ```
 
-### 自动续跑
+### Auto-Resume
 
-对于复杂任务，Agent 最多执行 **30 轮推理**，若仍未完成会自动注入续跑消息继续工作（最多续跑 5 次），合计最高 **150 轮**，确保长任务不中断。
+For complex tasks, the Agent runs up to **30 reasoning rounds**. If still incomplete, it automatically injects a continuation message and keeps going — up to **5 auto-resumes**, giving a total of **150 effective rounds** to handle long-running tasks without interruption.
 
 ---
 
-## 🔄 部署流程
+## 🔄 Deployment Workflow
 
-### 蓝绿部署流程
+### Blue-Green Deployment Steps
 
 ```
-┌─────────────┐
-│ 1. 准备新版本 │  当前蓝色环境（8080）继续服务
-└──────┬──────┘  在绿色环境（8081）部署新版本
-       │
-       ▼
-┌─────────────┐
-│ 2. 测试新版本 │  curl http://localhost:8081/health
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 3. 切换流量  │  curl -X POST "http://localhost:8001/switch?env=green"
-└──────┬──────┘  所有流量切换到绿色环境
-       │
-       ▼
-┌─────────────┐
-│ 4. 验证服务  │  curl http://localhost:8001/status
-└──────┬──────┘  确认切换成功
-       │
-       ▼
-┌─────────────┐
-│ 5. 回滚（可选）│ curl -X POST "http://localhost:8001/switch?env=blue"
-└─────────────┘  如有问题，立即回滚
+┌──────────────────┐
+│ 1. Prepare release│  Blue env (8080) keeps serving
+└────────┬─────────┘  Deploy new version to green (8081)
+         │
+         ▼
+┌──────────────────┐
+│ 2. Test new build │  curl http://localhost:8081/health
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│ 3. Switch traffic │  curl -X POST "http://localhost:8001/switch?env=green"
+└────────┬─────────┘  All traffic now routes to green
+         │
+         ▼
+┌──────────────────┐
+│ 4. Verify         │  curl http://localhost:8001/status
+└────────┬─────────┘  Confirm switch succeeded
+         │
+         ▼
+┌──────────────────┐
+│ 5. Rollback (opt) │  curl -X POST "http://localhost:8001/switch?env=blue"
+└──────────────────┘  Revert instantly if issues arise
 ```
 
-### 使用 CLI 执行部署
+### CLI-Based Deployment
 
 ```bash
-# 启动 CLI
 ./ruoyi-proxy-linux cli
 
-# 执行部署（自动化整个流程）
-ruoyi> deploy
+ruoyi> deploy          # Run the full automated deployment
 
-# 或手动控制每一步
-ruoyi> status          # 查看当前状态
-ruoyi> switch green    # 切换到绿色环境
-ruoyi> status          # 验证切换结果
-ruoyi> switch blue     # 如需回滚
+# Or control each step manually
+ruoyi> status          # Check current state
+ruoyi> switch green    # Route traffic to green
+ruoyi> status          # Confirm the switch
+ruoyi> switch blue     # Rollback if needed
 ```
 
-### 生产部署建议
+### Production Recommendations
 
-#### 1. 使用 systemd 管理服务
+#### 1. Manage with systemd
 
 ```bash
-# 初始化时会自动创建 systemd 服务
 sudo systemctl start ruoyi-proxy
-sudo systemctl enable ruoyi-proxy    # 开机自启
+sudo systemctl enable ruoyi-proxy    # Auto-start on boot
 sudo systemctl status ruoyi-proxy
 ```
 
-#### 2. 配置监控和告警
+#### 2. Monitoring and Alerts
 
 ```bash
-# 定期健康检查
+# Periodic health check
 */5 * * * * curl -sf http://localhost:8001/health || echo "Service down" | mail -s "Alert" admin@example.com
 
-# 日志监控
+# Log monitoring
 tail -f /var/log/ruoyi-proxy.log
 ```
 
-#### 3. 备份配置文件
+#### 3. Config Backup
 
 ```bash
-# 定期备份配置
 0 2 * * * tar -czf /backup/ruoyi-proxy-config-$(date +\%Y\%m\%d).tar.gz /opt/ruoyi-proxy/configs/
 ```
 
 ---
 
-## ❓ 常见问题
+## ❓ Troubleshooting
 
-### 端口被占用
+### Port Already in Use
 
-**问题**：启动时提示端口已被占用
+**Problem**: Startup fails with "port already in use"
 
-**解决方案**：
+**Solution**:
 ```bash
-# 查看端口占用
 netstat -tlnp | grep 8000
-
-# 修改配置文件中的端口
-ruoyi> config-edit
+ruoyi> config-edit   # Change the port in config
 ```
 
-### 配置文件不生效
+### Config Changes Not Taking Effect
 
-**问题**：修改配置后没有生效
+**Problem**: Edits to config files are ignored
 
-**解决方案**：
+**Solution**:
 ```bash
-# 删除旧配置，重新初始化
 rm configs/*.json
 ruoyi> init
 ```
 
-### 编译失败
+### Build Failures
 
-**问题**：编译时出现依赖错误
+**Problem**: Dependency errors during compilation
 
-**解决方案**：
+**Solution**:
 ```bash
-# 清理并重新安装依赖
 make clean
 go mod tidy
 make build
 ```
 
-### 代理服务无法启动
+### Proxy Fails to Start
 
-**问题**：执行 `proxy-start` 失败
+**Problem**: `proxy-start` returns an error
 
-**解决方案**：
+**Solution**:
 ```bash
-# 检查是否已编译
-make build
-
-# 检查端口是否被占用
-netstat -tlnp | grep 8001
-
-# 查看详细日志
-ruoyi> logs
+make build                    # Ensure binary is compiled
+netstat -tlnp | grep 8001     # Check port availability
+ruoyi> logs                   # View detailed logs
 ```
 
-### HTTPS 证书申请失败
+### HTTPS Certificate Request Fails
 
-**问题**：申请 Let's Encrypt 证书失败
+**Problem**: Let's Encrypt certificate request fails
 
-**解决方案**：
-1. 确保域名已正确解析到服务器
-2. 确保 80 端口可以被外部访问
-3. 检查 Nginx 是否正常运行
-4. 查看详细错误日志
+**Solution**:
+1. Make sure the domain resolves to this server's IP
+2. Ensure port 80 is accessible from the internet
+3. Check that Nginx is running
+4. Review the error output for details
 
 ---
 
-## 🏗️ 架构设计
+## 🏗️ Architecture
 
-### 系统架构
+### System Architecture
 
 ```
 ┌─────────────┐
-│   客户端     │
+│   Client    │
 └──────┬──────┘
        │
        ▼
 ┌─────────────┐
-│   Nginx     │  :80/:443
-│  (反向代理)  │
+│    Nginx    │  :80 / :443
+│   (proxy)   │
 └──────┬──────┘
        │
        ▼
 ┌─────────────┐
-│ Ruoyi Proxy │  :8000 (代理端口)
-│             │  :8001 (管理端口)
+│ Ruoyi Proxy │  :8000 (proxy port)
+│             │  :8001 (management port)
 └──────┬──────┘
        │
        ├─────────────┬─────────────┐
        ▼             ▼             ▼
 ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ 蓝色环境  │  │ 绿色环境  │  │ 其他服务  │
+│   Blue   │  │  Green   │  │  Other   │
 │  :8080   │  │  :8081   │  │  :808x   │
 └──────────┘  └──────────┘  └──────────┘
 ```
 
-### 模块职责
+### Module Responsibilities
 
-| 模块 | 职责 | 说明 |
-|------|------|------|
-| **cmd/proxy** | 程序入口 | 启动各个服务，初始化配置 |
-| **internal/config** | 配置管理 | 加载、保存、验证配置文件 |
-| **internal/proxy** | 反向代理 | 核心代理逻辑，蓝绿切换 |
-| **internal/handler** | HTTP 处理 | 管理 API 接口处理 |
-| **internal/cli** | CLI 管理 | 交互式命令行界面 |
-| **internal/sync** | 文件同步 | 主从服务器文件同步 |
+| Module | Role | Description |
+|--------|------|-------------|
+| **cmd/proxy** | Entry point | Starts all services, initializes config |
+| **internal/config** | Config management | Load, save, validate config files |
+| **internal/proxy** | Reverse proxy | Core proxy logic and blue-green switching |
+| **internal/handler** | HTTP handlers | Management API endpoints |
+| **internal/cli** | CLI interface | Interactive command-line interface |
+| **internal/sync** | File sync | Primary/replica server file synchronization |
+| **internal/agent** | AI operations | ReAct engine, tools, LLM adapters |
 
-### 数据流
+### Data Flow
 
-#### 代理请求流程
+#### Proxy Request
 ```
-客户端 → Nginx(:80) → Proxy(:8000) → 蓝色/绿色环境 → 返回响应
-```
-
-#### 环境切换流程
-```
-管理员 → CLI/API(:8001) → 验证环境 → 更新配置 → 保存文件 → 返回结果
+Client → Nginx(:80) → Proxy(:8000) → Blue/Green environment → Response
 ```
 
-### 设计原则
+#### Environment Switch
+```
+Admin → CLI/API(:8001) → Validate env → Update config → Save file → Return result
+```
 
-1. **单一职责** - 每个包只负责一个明确的功能
-2. **依赖注入** - 通过参数传递依赖，便于测试
-3. **配置驱动** - 所有配置通过文件管理，易于维护
-4. **并发安全** - 使用 `atomic.Value` 保证线程安全
-5. **错误处理** - 完善的日志记录和错误返回
+### Design Principles
 
-### 性能优化
+1. **Single responsibility** - Each package has one clearly defined purpose
+2. **Dependency injection** - Dependencies passed as parameters for testability
+3. **Config-driven** - All settings managed through files
+4. **Concurrency safety** - `atomic.Value` ensures thread safety
+5. **Error handling** - Comprehensive logging and error propagation
 
-- **连接池**：配置 `http.Transport` 连接池，复用连接
-- **超时控制**：合理设置读写超时，避免资源泄漏
-- **并发处理**：使用 goroutine 处理独立任务
-- **内存优化**：禁用不必要的压缩，减少 CPU 使用
+### Performance Optimizations
 
-### 安全建议
+- **Connection pooling**: Configured `http.Transport` with connection reuse
+- **Timeout control**: Appropriate read/write timeouts to prevent resource leaks
+- **Concurrent processing**: Goroutines for independent tasks
+- **Memory efficiency**: Disabled unnecessary compression to reduce CPU usage
 
-1. ✅ **使用 HTTPS** - 生产环境必须配置 SSL 证书
-2. ✅ **限制端口访问** - 使用防火墙限制管理端口（8001）
-3. ✅ **日志审计** - 记录所有管理操作
-4. ✅ **权限控制** - 文件和目录权限最小化
-5. ✅ **定期备份** - 定期备份配置文件和证书
+### Security Recommendations
+
+1. ✅ **Use HTTPS** - SSL certificates are mandatory in production
+2. ✅ **Restrict port access** - Firewall the management port (8001)
+3. ✅ **Audit logs** - Log all management operations
+4. ✅ **Least privilege** - Minimize file and directory permissions
+5. ✅ **Regular backups** - Back up config files and certificates periodically
 
 ---
 
-## 🤝 贡献
+## 🤝 Contributing
 
-欢迎贡献代码、报告问题或提出建议！
+Contributions, bug reports, and feature suggestions are welcome!
 
-### 如何贡献
+### How to Contribute
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+1. Fork this repository
+2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-### 报告问题
+### Reporting Issues
 
-如果你发现了 bug 或有功能建议，请[创建 Issue](https://github.com/xuantiandaozun/ruoyi-proxy/issues)。
-
----
-
-## 📄 许可证
-
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+Found a bug or have a feature request? [Open an issue](https://github.com/xuantiandaozun/ruoyi-proxy/issues).
 
 ---
 
-## 🙏 致谢
+## 📄 License
 
-感谢所有为本项目做出贡献的开发者！
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgements
+
+Thanks to everyone who has contributed to this project!
 
 ---
 
 <div align="center">
 
-**如果这个项目对你有帮助，请给个 ⭐️ Star 支持一下！**
+**If this project helps you, please give it a ⭐️ Star!**
 
 Made with ❤️ by [xuantiandaozun](https://github.com/xuantiandaozun)
 
