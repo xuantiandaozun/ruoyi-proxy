@@ -639,12 +639,20 @@ func (c *CLI) StartAgent() {
 	execCtx := agent.BuildExecContext(c.currentService)
 
 	confirm := func(prompt string) bool {
-		fmt.Print(prompt)
-		line, err := c.readLineWithPrompt("")
+		// prompt 为空时说明上层已打印了提示（自动确认逻辑分支时 prompt="" 且不会走到这里）
+		// 正常流程：上层打印 "▶ 直接按 Enter 确认执行，输入 n 取消: "，此处读取输入
+		line, err := c.readLineWithPrompt(prompt)
 		if err != nil {
 			return false
 		}
-		return strings.ToLower(strings.TrimSpace(line)) == "y"
+		s := strings.ToLower(strings.TrimSpace(line))
+		// 空白（直接按 Enter）或任意确认词均视为同意
+		if s == "" || s == "y" || s == "yes" || s == "ok" ||
+			s == "确认" || s == "同意" || s == "好" || s == "好的" ||
+			s == "可以" || s == "是" || s == "是的" {
+			return true
+		}
+		return false
 	}
 
 	readInput := func(prompt string) (string, error) {

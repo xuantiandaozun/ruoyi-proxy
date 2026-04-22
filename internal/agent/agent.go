@@ -14,15 +14,16 @@ const (
 
 // Agent AI 对话代理，实现 ReAct 循环
 type Agent struct {
-	provider  Provider
-	executor  *ToolExecutor
-	ctx       *ContextManager
-	aiCfg     AIConfig
-	execCtx   ExecContext
+	provider   Provider
+	executor   *ToolExecutor
+	ctx        *ContextManager
+	aiCfg      AIConfig
+	execCtx    ExecContext
+	lastInput  string // 用户最后一条消息，用于判断是否已提前确认
 	// 回调函数（由 CLI 注入）
-	confirm   func(prompt string) bool      // 写操作确认
+	confirm   func(prompt string) bool           // 写操作确认
 	readInput func(prompt string) (string, error) // 读用户输入
-	print     func(s string)                // 普通输出
+	print     func(s string)                     // 普通输出
 }
 
 // New 创建 Agent
@@ -86,6 +87,7 @@ func (a *Agent) Run() {
 			continue
 		}
 
+		a.lastInput = input // 记录用户最后一条消息，供写操作确认使用
 		a.ctx.Add(Message{Role: "user", Content: input})
 		if err := a.runReAct(); err != nil {
 			a.print(fmt.Sprintf("\n\033[1;31m✗ 错误: %v\033[0m\n", err))
@@ -194,8 +196,15 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 		}
 		fmt.Println("\033[1;33m└────────────────────────────────────┘\033[0m")
 
-		if !a.confirm("\033[1;33m确认执行? (y/n): \033[0m") {
-			return "用户取消了此操作", nil
+		// 用户最后一条消息本身是确认词，自动批准
+		if isStandaloneAffirmative(a.lastInput) {
+			fmt.Printf("\033[1;32m✓ 已根据您的指令自动确认\033[0m\n")
+		} else {
+			// 需要用户交互确认
+			fmt.Printf("\033[1;33m▶ 直接按 Enter 确认执行，输入 n 取消: \033[0m")
+			if !a.confirm("") {
+				return "用户取消了此操作", nil
+			}
 		}
 	}
 
@@ -298,4 +307,32 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// isStandaloneAffirmative 判断用户消息是否是独立的确认词
+// 用于：用户已经发送了确认意图时，自动跳过写操作的二次确认框
+func isStandaloneAffirmative(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	// 纯确认词列表
+	exact := []string{
+		"y", "yes", "ok", "好", "是", "嗯",
+		"确认", "同意", "可以", "行", "好的",
+		"执行", "继续", "去做", "做吧", "没问题",
+		"是的", "对", "对的", "去吧",
+	}
+	for _, w := range exact {
+		if s == w {
+			return true
+		}
+	}
+	// 以确认词开头且整体较短（≤8个字符）的情况，如"确认删除"、"好的去做"
+	if len([]rune(s)) <= 8 {
+		prefixes := []string{"确认", "同意", "好的", "可以", "执行", "去做"}
+		for _, p := range prefixes {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		}
+	}
+	return false
 }
