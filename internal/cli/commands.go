@@ -638,10 +638,9 @@ func (c *CLI) StartAgent() {
 
 	execCtx := agent.BuildExecContext(c.currentService)
 
-	confirm := func(prompt string) bool {
-		// prompt 为空时说明上层已打印了提示（自动确认逻辑分支时 prompt="" 且不会走到这里）
-		// 正常流程：上层打印 "▶ 直接按 Enter 确认执行，输入 n 取消: "，此处读取输入
-		line, err := c.readLineWithPrompt(prompt)
+	confirm := func(_ string) bool {
+		// 提示文字已由 printConfirmBox 在框内打印，此处只需读取输入
+		line, err := c.readLineWithPrompt("")
 		if err != nil {
 			return false
 		}

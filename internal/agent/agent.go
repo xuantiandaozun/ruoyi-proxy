@@ -230,17 +230,9 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 			fmt.Printf("\033[1;32m  ✓ 自动确认（已获得授权）\033[0m\n")
 		} else {
 			// 情况2：需要用户手动确认 → 弹出确认框
-			fmt.Println()
-			fmt.Println("\033[1;33m┌────────────────────────────────────┐\033[0m")
-			fmt.Printf("\033[1;33m│  ⚠  即将执行写操作                   │\033[0m\n")
-			fmt.Printf("\033[1;33m│  工具: %-30s│\033[0m\n", tc.Name)
-			if argsDisplay != "" {
-				fmt.Printf("\033[1;33m│  参数: %-30s│\033[0m\n", argsDisplay)
-			}
-			fmt.Println("\033[1;33m└────────────────────────────────────┘\033[0m")
-			fmt.Printf("\033[1;33m▶ 直接按 Enter 确认执行，输入 n 取消: \033[0m")
-
+			printConfirmBox(tc.Name, argsDisplay)
 			if !a.confirm("") {
+				fmt.Printf("\033[1;31m  ✗ 已取消\033[0m\n")
 				return "用户取消了此操作", nil
 			}
 			// 手动确认后，本轮次剩余写操作均自动放行
@@ -354,6 +346,98 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// printConfirmBox 打印带确认/取消说明的操作确认框
+func printConfirmBox(toolName, argsDisplay string) {
+	const innerWidth = 48 // 框内可用宽度（字符数，中文算2）
+
+	// 辅助：按可见宽度截断并右填充空格
+	pad := func(s string, width int) string {
+		w := visibleWidth(s)
+		if w > width {
+			// 截断
+			runes := []rune(s)
+			cur := 0
+			for i, r := range runes {
+				cw := 1
+				if r > 0x7F {
+					cw = 2
+				}
+				if cur+cw > width-1 {
+					s = string(runes[:i]) + "…"
+					w = width
+					break
+				}
+				cur += cw
+			}
+			w = width
+		}
+		return s + strings.Repeat(" ", width-w)
+	}
+
+	border := strings.Repeat("─", innerWidth+2)
+	fmt.Println()
+	fmt.Printf("\033[1;33m┌%s┐\033[0m\n", border)
+	fmt.Printf("\033[1;33m│  ⚠  即将执行写操作%-*s│\033[0m\n", innerWidth-10, "")
+	fmt.Printf("\033[1;33m│  工具: %s│\033[0m\n", pad(toolName, innerWidth-4))
+	if argsDisplay != "" {
+		// 参数可能很长，超出宽度时分行
+		lines := splitToWidth(argsDisplay, innerWidth-4)
+		for i, line := range lines {
+			prefix := "  参数: "
+			if i > 0 {
+				prefix = "        "
+			}
+			fmt.Printf("\033[1;33m│%s%s│\033[0m\n", prefix, pad(line, innerWidth-len([]rune(prefix))+2))
+		}
+	}
+	fmt.Printf("\033[1;33m├%s┤\033[0m\n", border)
+	fmt.Printf("\033[1;32m│  ✓ 确认: 直接按 Enter 或输入 y%-*s│\033[0m\n", innerWidth-18, "")
+	fmt.Printf("\033[1;31m│  ✗ 取消: 输入 n%-*s│\033[0m\n", innerWidth-8, "")
+	fmt.Printf("\033[1;33m└%s┘\033[0m\n", border)
+	fmt.Printf("\033[1;33m▶ \033[0m")
+}
+
+// visibleWidth 计算字符串的可见终端宽度（ASCII=1，中文/全角=2）
+func visibleWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if r > 0x7F {
+			w += 2
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+// splitToWidth 将字符串按可见宽度切分为多行
+func splitToWidth(s string, maxW int) []string {
+	if visibleWidth(s) <= maxW {
+		return []string{s}
+	}
+	var lines []string
+	runes := []rune(s)
+	cur := 0
+	start := 0
+	for i, r := range runes {
+		cw := 1
+		if r > 0x7F {
+			cw = 2
+		}
+		if cur+cw > maxW {
+			lines = append(lines, string(runes[start:i]))
+			start = i
+			cur = cw
+		} else {
+			cur += cw
+		}
+	}
+	if start < len(runes) {
+		lines = append(lines, string(runes[start:]))
+	}
+	return lines
 }
 
 // isReadOnlyShellCmd 判断 run_shell 的 arguments JSON 中的命令是否为只读操作
