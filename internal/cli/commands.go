@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"ruoyi-proxy/internal/agent"
 	"ruoyi-proxy/internal/config"
 )
 
@@ -50,7 +51,7 @@ func servicesFromConfig(cfg *config.Config) []ServiceStatus {
 
 // ShowDetailedStatus 显示详细状态
 func (c *CLI) ShowDetailedStatus() {
-	c.printInfo("获取系统状态..")
+	c.printInfo("获取系统状态...")
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
@@ -66,41 +67,35 @@ func (c *CLI) ShowDetailedStatus() {
 	services := servicesFromConfig(cfg)
 
 	fmt.Println("\n" + strings.Repeat("-", 70))
-	fmt.Println("\033[1;34mϵͳ״̬\033[0m")
+	fmt.Println("\033[1;34m系统状态\033[0m")
 	fmt.Println(strings.Repeat("-", 70))
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "[1;33m代理状态[0m	[1;32m%s[0m\n", status)
-
-	fmt.Fprintf(w, "[1;33m服务数量:[0m	[1;36m%d[0m\n", len(services))
-
-	fmt.Fprintf(w, "[1;33m代理端口:[0m	%s\n", config.ProxyPort)
-
-	fmt.Fprintf(w, "[1;33m时间:[0m	%s\n", time.Now().Format("2006-01-02 15:04:05"))
-
+	fmt.Fprintf(w, "\033[1;33m代理状态\033[0m\t\033[1;32m%s\033[0m\n", status)
+	fmt.Fprintf(w, "\033[1;33m服务数量:\033[0m\t\033[1;36m%d\033[0m\n", len(services))
+	fmt.Fprintf(w, "\033[1;33m代理端口:\033[0m\t%s\n", config.ProxyPort)
+	fmt.Fprintf(w, "\033[1;33m时间:\033[0m\t%s\n", time.Now().Format("2006-01-02 15:04:05"))
 	w.Flush()
 
 	fmt.Println(strings.Repeat("-", 70))
 
-	fmt.Println("\n\033[1;34m�����б�\033[0m")
+	fmt.Println("\n\033[1;34m服务列表\033[0m")
 	fmt.Println(strings.Repeat("-", 70))
 
 	w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w2, "[1;33m  %-12s	%-15s	%-8s	%s[0m\n", "ID", "名称", "环境", "目标地址")
-
-	fmt.Fprintf(w2, "  %s	%s	%s	%s\n", strings.Repeat("-", 12), strings.Repeat("-", 15), strings.Repeat("-", 8), strings.Repeat("-", 25))
+	fmt.Fprintf(w2, "\033[1;33m  %-12s\t%-15s\t%-8s\t%s\033[0m\n", "ID", "名称", "环境", "目标地址")
+	fmt.Fprintf(w2, "  %s\t%s\t%s\t%s\n", strings.Repeat("-", 12), strings.Repeat("-", 15), strings.Repeat("-", 8), strings.Repeat("-", 25))
 
 	for _, svc := range services {
-		envColor := "[1;34m"
+		envColor := "\033[1;34m"
 		if svc.ActiveEnv == "green" {
-			envColor = "[1;32m"
+			envColor = "\033[1;32m"
 		}
 		target := svc.BlueTarget
 		if svc.ActiveEnv == "green" {
 			target = svc.GreenTarget
 		}
-		fmt.Fprintf(w2, "  %-12s	%-15s	%s%-8s[0m	%s\n",
-
+		fmt.Fprintf(w2, "  %-12s\t%-15s\t%s%-8s\033[0m\t%s\n",
 			svc.ID, svc.Name, envColor, svc.ActiveEnv, target)
 	}
 	w2.Flush()
@@ -140,16 +135,16 @@ func (c *CLI) checkAllServicesHealth(services []ServiceStatus) {
 	fmt.Println(strings.Repeat("─", 70))
 }
 
-// QuickDeploy 快速部署向�?
+// QuickDeploy 快速部署向导
 func (c *CLI) QuickDeploy() {
-	fmt.Println("\n\033[1;34m══�?快速部署向�?═══\033[0m\n")
+	fmt.Println("\n\033[1;34m═══ 快速部署向导 ═══\033[0m\n")
 
 	steps := []string{
 		"准备AppCDS归档",
 		"启动待机环境",
-		"�������",
+		"健康检查",
 		"切换流量",
-		"����ɻ���",
+		"清理备用环境",
 	}
 
 	fmt.Println("部署步骤:")
@@ -157,7 +152,7 @@ func (c *CLI) QuickDeploy() {
 		fmt.Printf("  [%d/%d] %s\n", i+1, len(steps), step)
 	}
 
-	fmt.Print("\n\033[1;33m确认开始部�? (y/n): \033[0m")
+	fmt.Print("\n\033[1;33m确认开始部署 (y/n): \033[0m")
 	confirm, err := c.readLine()
 	if err != nil {
 		return
@@ -165,7 +160,7 @@ func (c *CLI) QuickDeploy() {
 
 	confirm = strings.ToLower(strings.TrimSpace(confirm))
 	if confirm != "y" && confirm != "yes" {
-		c.printInfo("��ȡ������")
+		c.printInfo("已取消")
 		return
 	}
 
@@ -173,47 +168,45 @@ func (c *CLI) QuickDeploy() {
 	c.executeScript("service.sh", "deploy")
 }
 
-// ShowLogs 显示日志（带颜色高亮�?
+// ShowLogs 显示日志（带颜色高亮）
 func (c *CLI) ShowLogs(lines string) {
-	c.printInfo(fmt.Sprintf("�鿴���%s����־", lines))
+	c.printInfo(fmt.Sprintf("查看最新%s行日志", lines))
 	fmt.Println(strings.Repeat("─", 60))
 
 	c.executeScript("service.sh", "logs", lines)
 }
 
-// InteractiveSwitch 交互式环境切�?
+// InteractiveSwitch 交互式环境切换
 func (c *CLI) InteractiveSwitch() {
-	fmt.Println("\n\033[1;34m=== �����л� ===\033[0m\n")
+	fmt.Println("\n\033[1;34m=== 环境切换 ===\033[0m\n")
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
-		c.printError(fmt.Sprintf("��ȡ����ʧ��: %v", err))
+		c.printError(fmt.Sprintf("读取配置失败: %v", err))
 		return
 	}
 
 	services := servicesFromConfig(cfg)
 	if len(services) == 0 {
-		c.printError("δ���÷���")
+		c.printError("未配置服务")
 		return
 	}
 
-	fmt.Println("�����б�:")
+	fmt.Println("服务列表:")
 	for i, svc := range services {
-		envColor := "[1;34m"
+		envColor := "\033[1;34m"
 		if svc.ActiveEnv == "green" {
-			envColor = "[1;32m"
+			envColor = "\033[1;32m"
 		}
-		fmt.Printf("  %d. %s (%s) - ����: %s%s\033[0m\n", i+1, svc.Name, svc.ID, envColor, svc.ActiveEnv)
-
+		fmt.Printf("  %d. %s (%s) - 当前环境: %s%s\033[0m\n", i+1, svc.Name, svc.ID, envColor, svc.ActiveEnv)
 	}
 
-	fmt.Println("\n�л���ʽ:")
-	fmt.Println("  1. �л����з���")
-	fmt.Println("  2. �л���������")
-	fmt.Println("  0. ȡ��")
+	fmt.Println("\n切换方式:")
+	fmt.Println("  1. 切换所有服务")
+	fmt.Println("  2. 切换单个服务")
+	fmt.Println("  0. 取消")
 
-	choice, err := c.readLineWithPrompt("\n\033[1;33mѡ��: \033[0m")
-
+	choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
 	if err != nil {
 		return
 	}
@@ -224,21 +217,21 @@ func (c *CLI) InteractiveSwitch() {
 	case "2":
 		c.switchSingleService(services)
 	case "0":
-		c.printInfo("��ȡ��")
+		c.printInfo("已取消")
 	default:
-		c.printError("��Чѡ��")
+		c.printError("无效选择")
 	}
 }
 
-// switchAllServices 切换所有服�?
+// switchAllServices 切换所有服务
 func (c *CLI) switchAllServices() {
-	env, err := c.readLineWithPrompt("[1;33m目标环境 (blue/green): [0m")
+	env, err := c.readLineWithPrompt("\033[1;33m目标环境 (blue/green): \033[0m")
 	if err != nil {
 		return
 	}
 	env = strings.TrimSpace(env)
 	if env != "blue" && env != "green" {
-		c.printError("环境必须�?blue �?green")
+		c.printError("环境必须是 blue 或 green")
 		return
 	}
 
@@ -257,13 +250,13 @@ func (c *CLI) switchAllServices() {
 		return
 	}
 
-	c.printSuccess(fmt.Sprintf("已切换所有服务到 %s (配置已更�?", env))
+	c.printSuccess(fmt.Sprintf("已切换所有服务到 %s (配置已更新)", env))
 	c.promptProxyRestart()
 }
 
 // switchSingleService 切换单个服务
 func (c *CLI) switchSingleService(services []ServiceStatus) {
-	serviceID, err := c.readLineWithPrompt("[1;33m服务ID: [0m")
+	serviceID, err := c.readLineWithPrompt("\033[1;33m服务ID: \033[0m")
 	if err != nil {
 		return
 	}
@@ -277,21 +270,21 @@ func (c *CLI) switchSingleService(services []ServiceStatus) {
 		}
 	}
 	if !found {
-		c.printError(fmt.Sprintf("服务不存�? %s", serviceID))
+		c.printError(fmt.Sprintf("服务不存在: %s", serviceID))
 		return
 	}
 
-	env, err := c.readLineWithPrompt("[1;33m目标环境 (blue/green): [0m")
+	env, err := c.readLineWithPrompt("\033[1;33m目标环境 (blue/green): \033[0m")
 	if err != nil {
 		return
 	}
 	env = strings.TrimSpace(env)
 	if env != "blue" && env != "green" {
-		c.printError("环境必须�?blue �?green")
+		c.printError("环境必须是 blue 或 green")
 		return
 	}
 
-	c.printInfo(fmt.Sprintf("切换服务[%s]�?%s...", serviceID, env))
+	c.printInfo(fmt.Sprintf("切换服务[%s]到%s...", serviceID, env))
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
@@ -300,7 +293,7 @@ func (c *CLI) switchSingleService(services []ServiceStatus) {
 	}
 	svc := cfg.GetService(serviceID)
 	if svc == nil {
-		c.printError(fmt.Sprintf("服务不存�? %s", serviceID))
+		c.printError(fmt.Sprintf("服务不存在: %s", serviceID))
 		return
 	}
 	svc.ActiveEnv = env
@@ -309,13 +302,13 @@ func (c *CLI) switchSingleService(services []ServiceStatus) {
 		return
 	}
 
-	c.printSuccess(fmt.Sprintf("服务[%s]已切换到 %s (配置已更�?", serviceID, env))
+	c.printSuccess(fmt.Sprintf("服务[%s]已切换到 %s (配置已更新)", serviceID, env))
 	c.promptProxyRestart()
 }
 
 // ShowSystemInfo 显示系统信息
 func (c *CLI) ShowSystemInfo() {
-	fmt.Println("\n\033[1;34m══�?系统信息 ═══\033[0m\n")
+	fmt.Println("\n\033[1;34m═══ 系统信息 ═══\033[0m\n")
 
 	// Java版本
 	c.printCommandOutput("Java版本", "java", "-version")
@@ -347,7 +340,7 @@ func (c *CLI) printCommandOutput(label string, name string, args ...string) {
 
 // ShowQuickCommands 显示快捷命令
 func (c *CLI) ShowQuickCommands() {
-	fmt.Println("\n\033[1;34m══�?快捷命令 ═══\033[0m\n")
+	fmt.Println("\n\033[1;34m═══ 快捷命令 ═══\033[0m\n")
 
 	commands := []struct {
 		cmd  string
@@ -357,12 +350,12 @@ func (c *CLI) ShowQuickCommands() {
 		{"stop", "停止服务"},
 		{"restart", "重启服务"},
 		{"deploy", "蓝绿部署"},
-		{"status", "�鿴״̬"},
+		{"status", "查看状态"},
 		{"logs", "查看日志"},
-		{"switch", "����ʽ�л�����"},
+		{"switch", "交互式切换环境"},
 		{"switch blue", "切换所有服务到blue"},
 		{"switch green", "切换所有服务到green"},
-		{"init", "��ʼ������"},
+		{"init", "初始化系统"},
 		{"cert <域名>", "申请SSL证书"},
 	}
 
@@ -374,109 +367,102 @@ func (c *CLI) ShowQuickCommands() {
 	fmt.Println()
 }
 
+const jvmConfigFile = "configs/app_config.json"
+
 // JVMConfig JVM配置管理
 func (c *CLI) JVMConfig() {
 	fmt.Println("\n\033[1;34m═══ JVM配置管理 ═══\033[0m\n")
 
-	configFile := "configs/app_config.json"
-
-	data, err := os.ReadFile(configFile)
+	data, err := os.ReadFile(jvmConfigFile)
 	if err != nil {
 		c.printError("配置文件不存在，请先运行 init 命令初始化")
 		return
 	}
 
-	var config map[string]interface{}
-	if err := json.Unmarshal(data, &config); err != nil {
+	var appConfig map[string]interface{}
+	if err := json.Unmarshal(data, &appConfig); err != nil {
 		c.printError("配置文件格式错误")
 		return
 	}
 
-	jvm, ok := config["jvm"].(map[string]interface{})
+	jvm, ok := appConfig["jvm"].(map[string]interface{})
 	if !ok {
-		// JVM配置不存在，自动创建默认配置
 		c.printWarning("JVM配置不存在，正在创建默认配置...")
 		jvm = createDefaultJVMConfig()
-		config["jvm"] = jvm
-
-		// 保存配置
-		data, err := json.MarshalIndent(config, "", "  ")
-		if err != nil {
-			c.printError("配置序列化失败")
+		appConfig["jvm"] = jvm
+		if err := saveAppConfig(appConfig); err != nil {
+			c.printError(fmt.Sprintf("保存配置文件失败: %v", err))
 			return
 		}
-
-		if err := os.WriteFile(configFile, data, 0644); err != nil {
-			c.printError("保存配置文件失败")
-			return
-		}
-
-		c.printSuccess("已创建默认JVM配置（档位2: 3核4G）")
+		c.printSuccess("已创建默认JVM配置（档位2: 2核4G）")
 		fmt.Println()
 	}
 
-	// 显示当前配置
-	currentPreset := int(jvm["preset"].(float64))
-	customOpts := ""
-	if co, ok := jvm["custom_opts"].(string); ok {
-		customOpts = co
-	}
+	for {
+		// 重新从内存读取最新 jvm（每次操作后可能已更新）
+		jvm = appConfig["jvm"].(map[string]interface{})
 
-	fmt.Printf("当前JVM预设档位: \033[1;36m%d\033[0m\n", currentPreset)
-	if customOpts != "" {
-		fmt.Printf("自定义参数: \033[1;36m%s\033[0m\n", customOpts)
-	}
-
-	// 显示预设配置
-	presets, ok := jvm["presets"].(map[string]interface{})
-	if !ok {
-		c.printError("预设配置不存在")
-		return
-	}
-
-	fmt.Println("\n\033[1;33m可用预设档位:\033[0m")
-	for i := 1; i <= 3; i++ {
-		key := fmt.Sprintf("%d", i)
-		if preset, ok := presets[key].(map[string]interface{}); ok {
-			name := preset["name"].(string)
-			xms := preset["xms"].(string)
-			xmx := preset["xmx"].(string)
-			gcThreads := int(preset["gc_threads"].(float64))
-			mark := ""
-			if i == currentPreset {
-				mark = " \033[1;32m← 当前\033[0m"
-			}
-			fmt.Printf("  %d. %s - 堆内存:%s-%s, GC线程:%d%s\n", i, name, xms, xmx, gcThreads, mark)
+		currentPreset := int(jvm["preset"].(float64))
+		customOpts := ""
+		if co, ok := jvm["custom_opts"].(string); ok {
+			customOpts = co
 		}
-	}
 
-	fmt.Println("\n\033[1;33m操作选项:\033[0m")
-	fmt.Println("  1. 切换预设档位")
-	fmt.Println("  2. 设置自定义参数")
-	fmt.Println("  3. 查看详细配置")
-	fmt.Println("  0. 返回")
+		presets, ok := jvm["presets"].(map[string]interface{})
+		if !ok {
+			c.printError("预设配置不存在")
+			return
+		}
 
-	choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
-	if err != nil {
-		return
-	}
+		fmt.Printf("\n当前JVM预设档位: \033[1;36m%d\033[0m\n", currentPreset)
+		if customOpts != "" {
+			fmt.Printf("自定义参数: \033[1;36m%s\033[0m\n", customOpts)
+		}
 
-	switch strings.TrimSpace(choice) {
-	case "1":
-		c.switchJVMPreset(config, jvm, presets)
-	case "2":
-		c.setJVMCustomOpts(config, jvm)
-	case "3":
-		c.showJVMDetail(jvm)
-	case "0":
-		return
-	default:
-		c.printError("无效选择")
+		fmt.Println("\n\033[1;33m可用预设档位:\033[0m")
+		for i := 1; i <= 3; i++ {
+			key := fmt.Sprintf("%d", i)
+			if preset, ok := presets[key].(map[string]interface{}); ok {
+				name := preset["name"].(string)
+				xms := preset["xms"].(string)
+				xmx := preset["xmx"].(string)
+				gcThreads := int(preset["gc_threads"].(float64))
+				mark := ""
+				if i == currentPreset {
+					mark = " \033[1;32m← 当前\033[0m"
+				}
+				fmt.Printf("  %d. %s - 堆内存:%s-%s, GC线程:%d%s\n", i, name, xms, xmx, gcThreads, mark)
+			}
+		}
+
+		fmt.Println("\n\033[1;33m操作选项:\033[0m")
+		fmt.Println("  1. 切换预设档位")
+		fmt.Println("  2. 设置自定义参数")
+		fmt.Println("  3. 查看详细配置")
+		fmt.Println("  0. 返回")
+
+		choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
+		if err != nil {
+			return
+		}
+
+		switch strings.TrimSpace(choice) {
+		case "1":
+			c.switchJVMPreset(appConfig, jvm)
+		case "2":
+			c.setJVMCustomOpts(appConfig, jvm)
+		case "3":
+			c.showJVMDetail(jvm)
+		case "0":
+			return
+		default:
+			c.printError("无效选择")
+		}
 	}
 }
 
 // switchJVMPreset 切换JVM预设档位
-func (c *CLI) switchJVMPreset(config map[string]interface{}, jvm map[string]interface{}, presets map[string]interface{}) {
+func (c *CLI) switchJVMPreset(appConfig map[string]interface{}, jvm map[string]interface{}) {
 	choice, err := c.readLineWithPrompt("\033[1;33m选择预设档位 (1-3): \033[0m")
 	if err != nil {
 		return
@@ -488,18 +474,12 @@ func (c *CLI) switchJVMPreset(config map[string]interface{}, jvm map[string]inte
 		return
 	}
 
-	jvm["preset"] = float64([]int{1, 2, 3}[presetNum[0]-'1'])
-	config["jvm"] = jvm
+	num := int(presetNum[0] - '0')
+	jvm["preset"] = float64(num)
+	appConfig["jvm"] = jvm
 
-	// 保存配置
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		c.printError("配置序列化失败")
-		return
-	}
-
-	if err := os.WriteFile("configs/app_config.json", data, 0644); err != nil {
-		c.printError("保存配置文件失败")
+	if err := saveAppConfig(appConfig); err != nil {
+		c.printError(fmt.Sprintf("保存配置文件失败: %v", err))
 		return
 	}
 
@@ -508,7 +488,7 @@ func (c *CLI) switchJVMPreset(config map[string]interface{}, jvm map[string]inte
 }
 
 // setJVMCustomOpts 设置自定义JVM参数
-func (c *CLI) setJVMCustomOpts(config map[string]interface{}, jvm map[string]interface{}) {
+func (c *CLI) setJVMCustomOpts(appConfig map[string]interface{}, jvm map[string]interface{}) {
 	currentOpts := ""
 	if co, ok := jvm["custom_opts"].(string); ok {
 		currentOpts = co
@@ -523,22 +503,24 @@ func (c *CLI) setJVMCustomOpts(config map[string]interface{}, jvm map[string]int
 	}
 
 	jvm["custom_opts"] = strings.TrimSpace(newOpts)
-	config["jvm"] = jvm
+	appConfig["jvm"] = jvm
 
-	// 保存配置
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		c.printError("配置序列化失败")
-		return
-	}
-
-	if err := os.WriteFile("configs/app_config.json", data, 0644); err != nil {
-		c.printError("保存配置文件失败")
+	if err := saveAppConfig(appConfig); err != nil {
+		c.printError(fmt.Sprintf("保存配置文件失败: %v", err))
 		return
 	}
 
 	c.printSuccess("自定义JVM参数已更新")
 	c.printInfo("重启Java应用后生效")
+}
+
+// saveAppConfig 保存 app_config.json
+func saveAppConfig(appConfig map[string]interface{}) error {
+	data, err := json.MarshalIndent(appConfig, "", "  ")
+	if err != nil {
+		return fmt.Errorf("配置序列化失败: %v", err)
+	}
+	return os.WriteFile(jvmConfigFile, data, 0644)
 }
 
 // showJVMDetail 显示JVM详细配置
@@ -604,14 +586,14 @@ func createDefaultJVMConfig() map[string]interface{} {
 				"parallel_gc_threads": float64(1),
 			},
 			"2": map[string]interface{}{
-				"name":                "3核4G",
-				"description":         "3核CPU，4G内存",
+				"name":                "2核4G",
+				"description":         "2核CPU，4G内存",
 				"xms":                 "1g",
 				"xmx":                 "3g",
 				"metaspace_size":      "256m",
 				"max_metaspace_size":  "512m",
-				"gc_threads":          float64(3),
-				"parallel_gc_threads": float64(3),
+				"gc_threads":          float64(2),
+				"parallel_gc_threads": float64(2),
 			},
 			"3": map[string]interface{}{
 				"name":                "4核8G",
@@ -644,4 +626,125 @@ func (c *CLI) MonitorMode() {
 			c.ShowDetailedStatus()
 		}
 	}
+}
+
+// StartAgent 启动 AI Agent 交互模式
+func (c *CLI) StartAgent() {
+	aiCfg, err := agent.LoadAIConfig()
+	if err != nil || !aiCfg.IsConfigured() {
+		fmt.Println("\033[1;33m⚠ AI 未配置，请先运行 agent-config 完成配置\033[0m")
+		return
+	}
+
+	execCtx := agent.BuildExecContext(c.currentService)
+
+	confirm := func(prompt string) bool {
+		fmt.Print(prompt)
+		line, err := c.readLineWithPrompt("")
+		if err != nil {
+			return false
+		}
+		return strings.ToLower(strings.TrimSpace(line)) == "y"
+	}
+
+	readInput := func(prompt string) (string, error) {
+		return c.readLineWithPrompt(prompt)
+	}
+
+	print := func(s string) {
+		fmt.Println(s)
+	}
+
+	a, err := agent.New(aiCfg, execCtx, confirm, readInput, print)
+	if err != nil {
+		fmt.Printf("\033[1;31m✗ 创建 Agent 失败: %v\033[0m\n", err)
+		return
+	}
+	a.Run()
+}
+
+// AgentConfig 配置 AI 提供商
+func (c *CLI) AgentConfig() {
+	aiCfg, _ := agent.LoadAIConfig()
+
+	fmt.Println("\033[1;34m═══ AI Agent 配置 ═══\033[0m")
+	fmt.Printf("当前提供商: \033[1;36m%s\033[0m\n", aiCfg.Provider)
+	fmt.Printf("当前模型:   \033[1;36m%s\033[0m\n", aiCfg.Model)
+	fmt.Printf("API Key:    \033[1;36m%s\033[0m\n", aiCfg.MaskedKey())
+	if aiCfg.BaseURL != "" {
+		fmt.Printf("Base URL:   \033[1;36m%s\033[0m\n", aiCfg.BaseURL)
+	}
+	fmt.Println()
+
+	fmt.Println("选择提供商:")
+	fmt.Println("  1) anthropic  (Claude)")
+	fmt.Println("  2) openai     (GPT / 兼容 API)")
+	fmt.Println("  3) ollama     (本地模型)")
+	fmt.Println("  0) 取消")
+
+	choice, err := c.readLineWithPrompt("请选择 (0-3): ")
+	if err != nil || strings.TrimSpace(choice) == "0" {
+		return
+	}
+
+	var provider string
+	switch strings.TrimSpace(choice) {
+	case "1":
+		provider = "anthropic"
+	case "2":
+		provider = "openai"
+	case "3":
+		provider = "ollama"
+	default:
+		fmt.Println("\033[1;31m✗ 无效选择\033[0m")
+		return
+	}
+
+	defaults := agent.DefaultAIConfig(provider)
+	aiCfg.Provider = provider
+
+	if provider != "ollama" {
+		apiKey, err := c.readLineWithPrompt(fmt.Sprintf("API Key (当前: %s): ", aiCfg.MaskedKey()))
+		if err != nil {
+			return
+		}
+		if strings.TrimSpace(apiKey) != "" {
+			aiCfg.APIKey = strings.TrimSpace(apiKey)
+		}
+	}
+
+	baseURLPrompt := fmt.Sprintf("Base URL (留空使用默认 %s): ", defaults.BaseURL)
+	if aiCfg.BaseURL != "" {
+		baseURLPrompt = fmt.Sprintf("Base URL (当前: %s, 留空保持): ", aiCfg.BaseURL)
+	}
+	baseURL, err := c.readLineWithPrompt(baseURLPrompt)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(baseURL) != "" {
+		aiCfg.BaseURL = strings.TrimSpace(baseURL)
+	} else if aiCfg.BaseURL == "" {
+		aiCfg.BaseURL = defaults.BaseURL
+	}
+
+	modelPrompt := fmt.Sprintf("模型名称 (留空使用默认 %s): ", defaults.Model)
+	if aiCfg.Model != "" {
+		modelPrompt = fmt.Sprintf("模型名称 (当前: %s, 留空保持): ", aiCfg.Model)
+	}
+	model, err := c.readLineWithPrompt(modelPrompt)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(model) != "" {
+		aiCfg.Model = strings.TrimSpace(model)
+	} else if aiCfg.Model == "" {
+		aiCfg.Model = defaults.Model
+	}
+
+	if err := agent.SaveAIConfig(aiCfg); err != nil {
+		fmt.Printf("\033[1;31m✗ 保存配置失败: %v\033[0m\n", err)
+		return
+	}
+
+	fmt.Printf("\033[1;32m✔ 配置已保存 — 提供商: %s  模型: %s\033[0m\n", aiCfg.Provider, aiCfg.Model)
 }

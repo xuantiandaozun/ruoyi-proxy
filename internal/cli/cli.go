@@ -85,6 +85,8 @@ func (c *CLI) Start() {
 		readline.PcItem("service-list"),
 		readline.PcItem("service-remove"),
 		readline.PcItem("jvm-config"),
+		readline.PcItem("agent"),
+		readline.PcItem("agent-config"),
 	)
 
 	// 初始化脚本和配置文件
@@ -204,6 +206,10 @@ func (c *CLI) printHelp() {
 	fmt.Println("    config         - 查看完整配置")
 	fmt.Println("    config-edit    - 编辑配置")
 	fmt.Println("    jvm-config     - JVM参数配置")
+	fmt.Println()
+	fmt.Println("  \033[1;33mAI Agent:\033[0m")
+	fmt.Println("    agent          - 进入 AI 对话模式（自然语言运维）")
+	fmt.Println("    agent-config   - 配置 AI 提供商（key/model/url）")
 	fmt.Println()
 	fmt.Println("  \033[1;33m系统信息:\033[0m")
 	fmt.Println("    info           - 显示系统信息")
@@ -373,6 +379,12 @@ func (c *CLI) handleCommand(input string) {
 
 	case "jvm-config":
 		c.JVMConfig()
+
+	case "agent":
+		c.StartAgent()
+
+	case "agent-config":
+		c.AgentConfig()
 
 	default:
 		c.printError(fmt.Sprintf("未知命令: %s", cmd))
