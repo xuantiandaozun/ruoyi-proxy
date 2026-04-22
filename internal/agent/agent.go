@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	maxReActIterations = 10
+	maxReActIterations = 30 // 单次 ReAct 最大推理轮数
+	maxAutoResume      = 5  // 超限后最多自动续接次数（总计最多 30×5=150 轮）
 	toolOutputMaxChars = 3000
 )
 
@@ -97,15 +98,41 @@ func (a *Agent) Run() {
 	}
 }
 
-// runReAct 执行 ReAct 循环（think → act → observe）
+// runReAct 执行 ReAct 循环，支持自动续接
 func (a *Agent) runReAct() error {
+	for resume := 0; resume <= maxAutoResume; resume++ {
+		done, err := a.runReActOnce()
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		// 未完成（达到单次迭代上限），自动续接
+		if resume < maxAutoResume {
+			fmt.Printf("\n\033[1;36mℹ 任务较复杂，自动继续处理中（第 %d/%d 次续接）...\033[0m\n\n",
+				resume+1, maxAutoResume)
+			// 注入续接消息，让 AI 知道需要继续
+			a.ctx.Add(Message{
+				Role:    "user",
+				Content: "请继续完成上面未完成的任务。",
+			})
+		}
+	}
+	return fmt.Errorf("任务超出最大处理轮数（%d 轮 × %d 次续接），请尝试分步执行",
+		maxReActIterations, maxAutoResume)
+}
+
+// runReActOnce 执行单次 ReAct 循环，返回 (是否正常完成, error)
+// 返回 false, nil 表示达到迭代上限，需要续接
+func (a *Agent) runReActOnce() (bool, error) {
 	bgCtx := context.Background()
 
 	for iter := 0; iter < maxReActIterations; iter++ {
 		// —— Think：调用 LLM ——
 		eventCh, err := a.provider.Stream(bgCtx, a.ctx.Messages(), AllTools)
 		if err != nil {
-			return fmt.Errorf("调用 AI 失败: %v", err)
+			return false, fmt.Errorf("调用 AI 失败: %v", err)
 		}
 
 		var textBuf strings.Builder
@@ -125,7 +152,7 @@ func (a *Agent) runReAct() error {
 			case "tool_calls":
 				toolCalls = append(toolCalls, event.ToolCalls...)
 			case "error":
-				return fmt.Errorf("流式输出错误: %v", event.Err)
+				return false, fmt.Errorf("流式输出错误: %v", event.Err)
 			}
 		}
 
@@ -142,10 +169,10 @@ func (a *Agent) runReAct() error {
 			ToolCalls: toolCalls,
 		})
 
-		// 没有工具调用 → 本轮结束
+		// 没有工具调用 → 正常完成
 		if len(toolCalls) == 0 {
 			fmt.Println()
-			return nil
+			return true, nil
 		}
 
 		// —— Act + Observe：执行工具调用 ——
@@ -165,7 +192,8 @@ func (a *Agent) runReAct() error {
 		// 继续下一轮 LLM 推理（分析工具结果）
 	}
 
-	return fmt.Errorf("超过最大推理轮数 (%d)", maxReActIterations)
+	// 达到单次迭代上限，需要外层续接
+	return false, nil
 }
 
 // executeToolCall 执行单个工具调用，写操作需要用户确认
