@@ -52,26 +52,25 @@ func (c *CLI) ensureScripts() error {
 	for _, script := range scripts {
 		scriptPath := filepath.Join(scriptsDir, script)
 
-		// 从嵌入的文件系统中提取（每次都覆盖）
+		// 检查文件是否存在，已存在则跳过
+		_, statErr := os.Stat(scriptPath)
+		if !os.IsNotExist(statErr) {
+			continue
+		}
+
+		// 从嵌入的文件系统中提取
 		data, err := scriptsFS.ReadFile(filepath.Join("scripts", script))
 		if err != nil {
 			c.printWarning(fmt.Sprintf("跳过 %s: %v", script, err))
 			continue
 		}
 
-		// 检查文件是否存在
-		_, statErr := os.Stat(scriptPath)
-		isNew := os.IsNotExist(statErr)
-
-		// 写入文件（覆盖）
 		if err := os.WriteFile(scriptPath, data, 0755); err != nil {
 			return fmt.Errorf("写入 %s 失败: %v", script, err)
 		}
 
-		if isNew {
-			c.printSuccess(fmt.Sprintf("创建脚本: %s", script))
-			updated = true
-		}
+		c.printSuccess(fmt.Sprintf("创建脚本: %s", script))
+		updated = true
 	}
 
 	if updated {
