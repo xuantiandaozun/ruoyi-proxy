@@ -350,51 +350,46 @@ func min(a, b int) int {
 
 // printConfirmBox 打印带确认/取消说明的操作确认框
 func printConfirmBox(toolName, argsDisplay string) {
-	const innerWidth = 48 // 框内可用宽度（字符数，中文算2）
+	const W = 52 // 框内可见总宽度（中文算2列）
 
-	// 辅助：按可见宽度截断并右填充空格
-	pad := func(s string, width int) string {
-		w := visibleWidth(s)
-		if w > width {
-			// 截断
-			runes := []rune(s)
-			cur := 0
-			for i, r := range runes {
-				cw := 1
-				if r > 0x7F {
-					cw = 2
-				}
-				if cur+cw > width-1 {
-					s = string(runes[:i]) + "…"
-					w = width
-					break
-				}
-				cur += cw
-			}
-			w = width
+	border := strings.Repeat("─", W)
+
+	// row 打印一行，自动用可见宽度补齐右边空格
+	row := func(leftColor, text string) {
+		w := visibleWidth(text)
+		pad := W - w
+		if pad < 0 {
+			pad = 0
 		}
-		return s + strings.Repeat(" ", width-w)
+		// 格式：左边框(黄) + 彩色内容 + 补空格 + 右边框(黄)
+		fmt.Printf("\033[1;33m│\033[0m%s%s%s\033[1;33m│\033[0m\n",
+			leftColor, text, strings.Repeat(" ", pad))
 	}
 
-	border := strings.Repeat("─", innerWidth+2)
+	// truncLine 截断超宽内容并加省略号
+	truncLine := func(prefix, content string) {
+		maxContent := W - visibleWidth(prefix)
+		lines := splitToWidth(content, maxContent)
+		for i, l := range lines {
+			if i == 0 {
+				row("\033[1;33m", prefix+l)
+			} else {
+				indent := strings.Repeat(" ", visibleWidth(prefix))
+				row("\033[1;33m", indent+l)
+			}
+		}
+	}
+
 	fmt.Println()
 	fmt.Printf("\033[1;33m┌%s┐\033[0m\n", border)
-	fmt.Printf("\033[1;33m│  ⚠  即将执行写操作%-*s│\033[0m\n", innerWidth-10, "")
-	fmt.Printf("\033[1;33m│  工具: %s│\033[0m\n", pad(toolName, innerWidth-4))
+	row("\033[1;33m", "  ⚠  即将执行写操作")
+	truncLine("  工具: ", toolName)
 	if argsDisplay != "" {
-		// 参数可能很长，超出宽度时分行
-		lines := splitToWidth(argsDisplay, innerWidth-4)
-		for i, line := range lines {
-			prefix := "  参数: "
-			if i > 0 {
-				prefix = "        "
-			}
-			fmt.Printf("\033[1;33m│%s%s│\033[0m\n", prefix, pad(line, innerWidth-len([]rune(prefix))+2))
-		}
+		truncLine("  参数: ", argsDisplay)
 	}
 	fmt.Printf("\033[1;33m├%s┤\033[0m\n", border)
-	fmt.Printf("\033[1;32m│  ✓ 确认: 直接按 Enter 或输入 y%-*s│\033[0m\n", innerWidth-18, "")
-	fmt.Printf("\033[1;31m│  ✗ 取消: 输入 n%-*s│\033[0m\n", innerWidth-8, "")
+	row("\033[1;32m", "  ✓ 确认: 直接按 Enter 或输入 y")
+	row("\033[1;31m", "  ✗ 取消: 输入 n")
 	fmt.Printf("\033[1;33m└%s┘\033[0m\n", border)
 	fmt.Printf("\033[1;33m▶ \033[0m")
 }
@@ -476,34 +471,63 @@ func isReadOnlyShellCmd(argsJSON string) bool {
 		}
 	}
 
-	// 这些命令前缀 → 明确是只读
+	// 这些命令（精确匹配或前缀匹配）→ 明确是只读
 	readOnlyPrefixes := []string{
-		"nginx -t", "nginx -T",             // nginx 配置检测
-		"ls", "ll", "dir",                  // 目录列表
-		"cat ", "less ", "more ", "head ", "tail ", // 文件查看
-		"grep ", "awk ", "sed -n", "sort ", "uniq ", "wc ", // 文本处理（不修改）
-		"find ", "locate ",                 // 文件查找
-		"df ", "du ", "lsblk ",             // 磁盘信息
-		"ps ", "top ", "htop ", "uptime",   // 进程/负载
-		"free ", "vmstat ", "iostat ",      // 内存/IO
-		"netstat", "ss ", "lsof ",          // 网络连接
-		"ping ", "traceroute ", "nslookup ", "dig ", "curl -s", "curl -I", // 网络测试
-		"echo ", "printf ",                 // 输出（不写文件时）
-		"date", "hostname", "uname",        // 系统信息
-		"whoami", "id ", "groups ",         // 用户信息
-		"which ", "type ", "whereis ",      // 命令查找
-		"stat ", "file ", "md5sum ", "sha256sum ", // 文件信息
-		"env", "printenv", "set ",          // 环境变量查看
-		"java -version", "java --version",  // 版本信息
-		"python", "node -v", "go version",  // 运行时版本
-		"systemctl status", "systemctl is-active", "systemctl is-enabled", // 状态查询（只读）
-		"journalctl ",                      // 日志查看
-		"rpm -q", "dpkg -l", "apt list",    // 包查询
+		// nginx 检测
+		"nginx -t", "nginx -T",
+		// 目录/文件列表
+		"ls", "ll", "dir", "pwd", "realpath",
+		// 文件查看
+		"cat", "less", "more", "head", "tail", "strings",
+		// 文本处理（非原地修改）
+		"grep", "awk", "sed -n", "sort", "uniq", "wc", "cut", "tr", "diff", "comm",
+		// 文件查找
+		"find", "locate", "which", "type", "whereis",
+		// 磁盘信息
+		"df", "du", "lsblk", "blkid", "fdisk -l",
+		// 进程/负载
+		"ps", "top", "htop", "uptime", "pstree", "pgrep",
+		// 内存/IO
+		"free", "vmstat", "iostat", "sar", "mpstat",
+		// 网络信息（只查看）
+		"netstat", "ss", "lsof", "ifconfig", "ip addr", "ip route", "ip link",
+		// 网络测试（不修改状态）
+		"ping", "traceroute", "tracepath", "nslookup", "dig", "host",
+		"curl -s", "curl -I", "curl --silent", "curl --head", "curl --head",
+		// 系统信息
+		"uname", "hostname", "date", "timedatectl status",
+		"lscpu", "lshw", "dmidecode", "inxi",
+		// 用户信息
+		"whoami", "id", "groups", "w", "who", "last", "lastlog",
+		// 文件信息
+		"stat", "file", "md5sum", "sha256sum", "sha1sum", "xxd",
+		// 环境/变量查看
+		"env", "printenv", "set",
+		// 版本信息
+		"java -version", "java --version",
+		"python --version", "python3 --version",
+		"node --version", "node -v",
+		"go version", "ruby --version", "php --version",
+		"nginx -v", "nginx -V",
+		"mysql --version", "redis-cli --version",
+		// systemd 只读查询
+		"systemctl status", "systemctl is-active", "systemctl is-enabled",
+		"systemctl list-units", "systemctl list-services",
+		// 日志查看
+		"journalctl", "dmesg",
+		// 包查询（不安装）
+		"rpm -q", "rpm -qa", "dpkg -l", "dpkg -s",
+		"apt list", "apt show", "yum list", "yum info",
+		"dnf list", "dnf info",
 	}
 	lowerCmd := strings.ToLower(cmd)
 	for _, prefix := range readOnlyPrefixes {
-		if strings.HasPrefix(lowerCmd, strings.ToLower(prefix)) {
-			return true
+		p := strings.ToLower(prefix)
+		if lowerCmd == p {
+			return true // 精确匹配（如 pwd、ls、date）
+		}
+		if strings.HasPrefix(lowerCmd, p+" ") || strings.HasPrefix(lowerCmd, p+"\t") {
+			return true // 前缀匹配（如 ls -la、cat /etc/nginx.conf）
 		}
 	}
 
