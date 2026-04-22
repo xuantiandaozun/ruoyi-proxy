@@ -182,6 +182,11 @@ func (a *Agent) runReActOnce() (bool, error) {
 			if err != nil {
 				content = fmt.Sprintf("执行失败: %v", err)
 			}
+			// 确保工具结果非空：空字符串会导致 Anthropic API 的 content 字段被
+			// omitempty 省略，进而被解析为 null，触发 400 错误
+			if strings.TrimSpace(content) == "" {
+				content = "执行成功（命令无输出）"
+			}
 			a.ctx.Add(Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,

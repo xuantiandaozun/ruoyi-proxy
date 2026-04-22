@@ -99,8 +99,13 @@ func (p *openAIProvider) convertMessages(messages []Message) []openAIMessage {
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
 		}
-		if m.Content != "" {
-			om.Content = m.Content
+		content := m.Content
+		// tool 角色的消息内容不能为空，空字符串会导致部分 API（如 Anthropic 兼容层）报错
+		if m.Role == "tool" && strings.TrimSpace(content) == "" {
+			content = "执行成功（命令无输出）"
+		}
+		if content != "" {
+			om.Content = content
 		}
 		for _, tc := range m.ToolCalls {
 			otc := openAIToolCall{ID: tc.ID, Type: "function"}

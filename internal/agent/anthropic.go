@@ -48,9 +48,10 @@ type anthropicBlock struct {
 	ID    string      `json:"id,omitempty"`
 	Name  string      `json:"name,omitempty"`
 	Input interface{} `json:"input,omitempty"`
-	// tool_result
-	ToolUseID string      `json:"tool_use_id,omitempty"`
-	Content   interface{} `json:"content,omitempty"` // string or []block
+	// tool_result — Content 必须是字符串且不能缺失，不加 omitempty
+	// 避免空字符串被 Go json 的 omitempty+interface{} 省略成 null
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content,omitempty"` // 固定 string，由调用方保证非空
 }
 
 type anthropicToolDef struct {
@@ -122,10 +123,14 @@ func (p *anthropicProvider) convertMessages(messages []Message) (system string, 
 			// 收集连续的 tool 消息，合并为一个 user 消息
 			var results []anthropicBlock
 			for i < len(messages) && messages[i].Role == "tool" {
+				c := messages[i].Content
+				if strings.TrimSpace(c) == "" {
+					c = "执行成功（命令无输出）" // 兜底：Anthropic 不接受空 content
+				}
 				results = append(results, anthropicBlock{
 					Type:      "tool_result",
 					ToolUseID: messages[i].ToolCallID,
-					Content:   messages[i].Content,
+					Content:   c,
 				})
 				i++
 			}
