@@ -141,11 +141,14 @@ func (a *Agent) runReActOnce() (bool, error) {
 		var toolCalls []ToolCall
 		var reasoningContent string
 
-		fmt.Print("\n\033[1;35mAI\033[0m: \033[2m思考中...\033[0m")
+		// 打印前缀并保存光标位置，流式结束后回到此处覆写为渲染后的 Markdown
+		fmt.Print("\n\033[1;35mAI\033[0m:\n")
+		fmt.Print("\033[s")
 
 		for event := range eventCh {
 			switch event.Type {
 			case "text":
+				fmt.Print(event.Text) // 打字机效果
 				textBuf.WriteString(event.Text)
 			case "tool_calls":
 				toolCalls = append(toolCalls, event.ToolCalls...)
@@ -158,9 +161,11 @@ func (a *Agent) runReActOnce() (bool, error) {
 
 		assistantContent := strings.TrimSpace(textBuf.String())
 		if assistantContent != "" {
-			fmt.Printf("\r\033[2K\033[1;35mAI\033[0m:\n%s\n", renderMarkdown(assistantContent))
+			fmt.Print("\033[u\033[J") // 恢复光标 + 清除到屏幕末尾
+			fmt.Print(renderMarkdown(assistantContent))
+			fmt.Println()
 		} else {
-			fmt.Print("\r\033[2K")
+			fmt.Println()
 		}
 
 		// 把 assistant 消息写入历史（reasoning_content 需原样传回，否则思考模式模型报 400）
