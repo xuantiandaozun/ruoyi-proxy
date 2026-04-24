@@ -27,11 +27,12 @@ func (p *openAIProvider) Model() string { return p.model }
 // ——— 请求/响应结构 ———
 
 type openAIMessage struct {
-	Role       string             `json:"role"`
-	Content    interface{}        `json:"content"` // string 或 nil
-	ToolCalls  []openAIToolCall   `json:"tool_calls,omitempty"`
-	ToolCallID string             `json:"tool_call_id,omitempty"`
-	Name       string             `json:"name,omitempty"`
+	Role             string           `json:"role"`
+	Content          interface{}      `json:"content"` // string 或 nil
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Name             string           `json:"name,omitempty"`
 }
 
 type openAIToolCall struct {
@@ -74,8 +75,9 @@ type openAIResponse struct {
 type openAIChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -95,9 +97,10 @@ func (p *openAIProvider) convertMessages(messages []Message) []openAIMessage {
 	var out []openAIMessage
 	for _, m := range messages {
 		om := openAIMessage{
-			Role:       m.Role,
-			ToolCallID: m.ToolCallID,
-			Name:       m.Name,
+			Role:             m.Role,
+			ReasoningContent: m.ReasoningContent,
+			ToolCallID:       m.ToolCallID,
+			Name:             m.Name,
 		}
 		content := m.Content
 		// tool 角色的消息内容不能为空，空字符串会导致部分 API（如 Anthropic 兼容层）报错
@@ -198,8 +201,9 @@ func (p *openAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		content = s
 	}
 	return &ChatResponse{
-		Content:   content,
-		ToolCalls: parseToolCalls(msg.ToolCalls),
+		Content:          content,
+		ReasoningContent: msg.ReasoningContent,
+		ToolCalls:        parseToolCalls(msg.ToolCalls),
 	}, nil
 }
 
@@ -263,6 +267,8 @@ func (p *openAIProvider) parseSSEStream(body io.Reader, ch chan<- StreamEvent) {
 	}
 	accum := make(map[int]*tcAccum)
 
+	var reasoningBuf strings.Builder
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -282,6 +288,11 @@ func (p *openAIProvider) parseSSEStream(body io.Reader, ch chan<- StreamEvent) {
 		}
 
 		delta := chunk.Choices[0].Delta
+
+		// 推理内容（DeepSeek 等思考模式）
+		if delta.ReasoningContent != "" {
+			reasoningBuf.WriteString(delta.ReasoningContent)
+		}
 
 		// 文本内容
 		if delta.Content != "" {
@@ -326,5 +337,5 @@ func (p *openAIProvider) parseSSEStream(body io.Reader, ch chan<- StreamEvent) {
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		ch <- StreamEvent{Type: "error", Err: fmt.Errorf("读取流失败: %v", err)}
 	}
-	ch <- StreamEvent{Type: "done"}
+	ch <- StreamEvent{Type: "done", ReasoningContent: reasoningBuf.String()}
 }

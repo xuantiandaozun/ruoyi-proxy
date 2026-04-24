@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/glamour"
 )
 
 const (
@@ -137,36 +139,36 @@ func (a *Agent) runReActOnce() (bool, error) {
 
 		var textBuf strings.Builder
 		var toolCalls []ToolCall
-		printedPrefix := false
+		var reasoningContent string
 
-		// 流式打印 AI 输出
+		fmt.Print("\n\033[1;35mAI\033[0m: \033[2m思考中...\033[0m")
+
 		for event := range eventCh {
 			switch event.Type {
 			case "text":
-				if !printedPrefix {
-					fmt.Print("\n\033[1;35mAI\033[0m: ")
-					printedPrefix = true
-				}
-				fmt.Print(event.Text)
 				textBuf.WriteString(event.Text)
 			case "tool_calls":
 				toolCalls = append(toolCalls, event.ToolCalls...)
+			case "done":
+				reasoningContent = event.ReasoningContent
 			case "error":
 				return false, fmt.Errorf("流式输出错误: %v", event.Err)
 			}
 		}
 
-		if printedPrefix {
-			fmt.Println()
+		assistantContent := strings.TrimSpace(textBuf.String())
+		if assistantContent != "" {
+			fmt.Printf("\r\033[2K\033[1;35mAI\033[0m:\n%s\n", renderMarkdown(assistantContent))
+		} else {
+			fmt.Print("\r\033[2K")
 		}
 
-		assistantContent := strings.TrimSpace(textBuf.String())
-
-		// 把 assistant 消息写入历史
+		// 把 assistant 消息写入历史（reasoning_content 需原样传回，否则思考模式模型报 400）
 		a.ctx.Add(Message{
-			Role:      "assistant",
-			Content:   assistantContent,
-			ToolCalls: toolCalls,
+			Role:             "assistant",
+			Content:          assistantContent,
+			ReasoningContent: reasoningContent,
+			ToolCalls:        toolCalls,
 		})
 
 		// 没有工具调用 → 正常完成
@@ -565,4 +567,20 @@ func isStandaloneAffirmative(s string) bool {
 		}
 	}
 	return false
+}
+
+// renderMarkdown 将 Markdown 文本渲染为带 ANSI 颜色的终端输出
+func renderMarkdown(text string) string {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(120),
+	)
+	if err != nil {
+		return text
+	}
+	out, err := r.Render(text)
+	if err != nil {
+		return text
+	}
+	return strings.TrimRight(out, "\n")
 }
