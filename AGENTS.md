@@ -2,250 +2,127 @@
 
 ## Project Overview
 
-This is **ruoyi-proxy** - a blue-green deployment proxy server for managing Java applications with zero-downtime deployments, HTTPS auto-configuration, and multi-service management.
+**ruoyi-proxy** — blue-green deployment proxy for managing Java apps with zero-downtime deployments,
+HTTPS auto-configuration, multi-service management, and an AI agent mode (ReAct engine).
 
-- **Language**: Go (version 1.24+)
+- **Language**: Go 1.24.1+
 - **Module**: `ruoyi-proxy`
-- **Main Entry**: `cmd/proxy/main.go`
+- **Entry point**: `cmd/proxy/main.go` (two modes: CLI `go run . cli` or proxy server `go run .`)
 
 ## Build Commands
 
 ```bash
-# Build for current platform (auto-syncs scripts/configs)
-make build
-
-# Build Linux version (for deployment)
-make linux
-
-# Run in development mode
-make run
-
-# Run interactive CLI mode
-make cli
-
-# Install dependencies
-go mod tidy
-go mod download
-
-# Clean build artifacts
-make clean
-
-# Format code
-go fmt ./...
+make build          # Auto-syncs scripts/configs, then builds for current platform → bin/ruoyi-proxy
+make linux          # Cross-compile for Linux (GOOS=linux GOARCH=amd64) → bin/ruoyi-proxy-linux
+make run            # Dev mode: go run cmd/proxy/main.go (proxy server, no CLI)
+make cli            # Dev CLI:  go run cmd/proxy/main.go cli
+make install        # go mod tidy && go mod download
+make clean          # rm -rf bin/ + runtime config files
+make fmt            # go fmt ./...
+make test           # go test -v ./...
 ```
+
+**Windows**: `build.bat` (no args = Windows build, `build.bat linux` = Linux cross-compile).
+It runs xcopy to sync scripts/configs before building, equivalent to `make sync && make build`.
+
+`make build` / `make linux` already call `make sync` first — no separate sync needed.
 
 ## Testing
 
-**No test files exist yet.** To run tests if they are added:
+No test files exist yet. Use `go test -v ./...` or `go test -v -run TestX ./path/to/package`.
 
-```bash
-# Run all tests
-go test -v ./...
-
-# Run single test
-go test -v -run TestFunctionName ./path/to/package
-```
-
-## Code Style Guidelines
-
-### General Go Conventions
-
-- Follow [Effective Go](https://golang.org/doc/effective_go.html)
-- Use `gofmt` to format all code
-- Line length: keep under 120 characters when possible
-- Use tabs for indentation (Go standard)
-
-### Naming Conventions
-
-- **Exported (public)**: PascalCase (e.g., `New`, `LoadConfig`, `ServiceConfig`)
-- **Unexported (private)**: camelCase (e.g., `createProxy`, `loadProxyConfig`)
-- **Constants**: PascalCase for exported, camelCase for unexported
-- **Interfaces**: `-er` suffix when appropriate (e.g., `Reader`, `Writer`)
-- **Acronyms**: Keep uppercase (e.g., `HTTPS`, `URL`, `ID`)
-
-### Imports
-
-```go
-import (
-    // Standard library packages first
-    "encoding/json"
-    "fmt"
-    "os"
-    
-    // Third-party packages second
-    "github.com/chzyer/readline"
-    "golang.org/x/term"
-    
-    // Internal/project packages last
-    "ruoyi-proxy/internal/config"
-    "ruoyi-proxy/internal/proxy"
-)
-```
-
-- Group imports: stdlib, external, internal
-- Use blank identifier imports only when necessary
-- Use dot imports sparingly and only in test files
-
-### Types and Structs
-
-```go
-// ServiceConfig 单个服务配置
-type ServiceConfig struct {
-    Name        string `json:"name"`         // 服务名称（显示用）
-    BlueTarget  string `json:"blue_target"`  // 蓝色环境地址
-    GreenTarget string `json:"green_target"` // 绿色环境地址
-    ActiveEnv   string `json:"active_env"`   // 当前活跃环境 blue/green
-}
-```
-
-- Add Chinese comments for exported types and fields
-- Use JSON tags for all struct fields that are serialized
-- Keep struct definitions in dedicated files (e.g., `config.go`)
-
-### Error Handling
-
-```go
-// Always check errors explicitly
-if err != nil {
-    return fmt.Errorf("operation failed: %v", err)
-}
-
-// Wrap errors with context
-return nil, fmt.Errorf("创建服务[%s]蓝色代理失败: %v", serviceID, err)
-
-// Log errors with context
-log.Printf("代理错误: %v, URL: %s", err, r.URL.String())
-```
-
-- Never ignore errors (avoid `_ = someFunc()`)
-- Wrap errors with meaningful context using `fmt.Errorf`
-- Use `log.Printf` for logging (not `println`)
-- Fatal only in `main()` or initialization: `log.Fatalf("初始化失败: %v", err)`
-
-### Concurrency
-
-```go
-type Proxy struct {
-    mu       sync.RWMutex
-    config   *config.Config
-    services map[string]*ServiceProxy
-}
-
-// Readers use RLock
-func (p *Proxy) GetConfig() *config.Config {
-    p.mu.RLock()
-    defer p.mu.RUnlock()
-    return p.config
-}
-
-// Writers use Lock
-func (p *Proxy) UpdateConfig(cfg *config.Config) error {
-    p.mu.Lock()
-    defer p.mu.Unlock()
-    // ... modify state
-}
-```
-
-- Use `sync.RWMutex` for protecting shared state
-- Always defer unlocks: `defer p.mu.Unlock()`
-- Minimize critical sections
-
-### File Organization
+## File Organization
 
 ```
 ruoyi-proxy/
-├── cmd/
-│   └── proxy/
-│       ├── main.go              # Entry point with embed directives
-│       ├── scripts/             # Embedded shell scripts (auto-synced)
-│       └── configs/             # Embedded config templates (auto-synced)
+├── cmd/proxy/
+│   ├── main.go              # Entry point (proxy server + /switch /status API)
+│   ├── scripts/             # Build artifact: copied from scripts/ (gitignored)
+│   └── configs/             # Build artifact: copied from configs/ (gitignored)
 ├── internal/
-│   ├── cli/                     # Interactive CLI commands
-│   │   ├── cli.go              # Main CLI logic
-│   │   ├── commands.go         # Command implementations
-│   │   ├── config.go           # Config management
-│   │   └── embed.go            # Embedded file handling
-│   ├── config/                  # Configuration types and loading
-│   │   └── config.go
-│   └── proxy/                   # Reverse proxy logic
-│       └── proxy.go
-├── scripts/                     # Source shell scripts (development)
-├── configs/                     # Source configs (development)
-└── bin/                         # Build output
+│   ├── agent/               # AI Agent (ReAct engine, LLM adapters, tools)
+│   │   ├── agent.go         #   ReAct loop, confirm flow, auto-resume (30×5 rounds)
+│   │   ├── types.go         #   Message, ToolDef, StreamEvent, ExecContext
+│   │   ├── provider.go      #   Provider interface + factory (openai/anthropic/ollama)
+│   │   ├── openai.go        #   OpenAI-compatible streaming adapter
+│   │   ├── anthropic.go     #   Anthropic streaming adapter
+│   │   ├── tools.go         #   Tool definitions + executor (14 tools, backup logic)
+│   │   ├── config.go        #   AIConfig load/save from app_config.json
+│   │   ├── context.go       #   Message history with token budget
+│   │   └── mdstream.go      #   Stream markdown → terminal (glamour)
+│   ├── cli/                 # Interactive CLI (readline-based, tab completion)
+│   │   ├── cli.go           #   Main CLI loop, all command handlers
+│   │   ├── commands.go      #   Agent start, status, deploy, etc.
+│   │   ├── config.go        #   Config display/edit, HTTPS enable/disable
+│   │   └── embed.go         #   Embedded FS injection from main
+│   ├── config/              # Proxy config types + load/save
+│   │   └── config.go        #   ServiceConfig, Config, LoadConfig, SaveConfig
+│   ├── proxy/               # Reverse proxy (blue-green routing)
+│   │   └── proxy.go         #   Path-based service routing, env switching
+│   ├── handler/             # (planned, currently empty)
+│   └── sync/                # (planned, currently empty)
+├── scripts/                 # Source shell scripts (service.sh, init.sh, https.sh, etc.)
+├── configs/                 # Source configs + nginx templates
+├── bin/                     # Build output (gitignored)
+├── build.bat                # Windows build script
+└── Makefile
 ```
 
-### Comments
+**Key fact**: `internal/handler/` and `internal/sync/` are empty — they are planned but have no code.
+Do not add import references to them.
 
-- Use Chinese comments for business logic
-- Use Go doc comments for exported functions/types
-- Format: `// FunctionName 功能描述`
+## Build Flow & Embed Mechanics
 
-```go
-// LoadConfig 加载代理配置文件
-func LoadConfig() (*Config, error) {
-    // ...
-}
+The `main.go` uses `//go:embed scripts/*` and `//go:embed configs/*` on `cmd/proxy/` subdirectories.
+Before compiling, `make sync` (or `build.bat`) copies `scripts/` and `configs/` into `cmd/proxy/`.
+Both `cmd/proxy/scripts/` and `cmd/proxy/configs/` are **gitignored** — they only exist after sync.
 
-// ServiceConfig 单个服务配置
-type ServiceConfig struct {
-    Name string `json:"name"` // 服务名称（显示用）
-}
+**If you modify anything in `scripts/` or `configs/`, you must rebuild** (not just `go run`).
+`make build` handles this automatically.
+
+## Runtime Config Files (gitignored)
+
+These are generated at runtime, **never commit them**:
+
+```
+configs/proxy_config.json    # Multi-service proxy targets + active env
+configs/app_config.json      # Domain, HTTPS, JVM presets, AI provider config
+configs/sync_config.json     # File sync settings
 ```
 
-### Constants
+## Code Conventions
 
-```go
-const (
-    ConfigFile = "configs/proxy_config.json"
-    ProxyPort  = ":8000" // 代理监听端口
-    MgmtPort   = ":8001" // 管理接口端口
-)
-```
+- **Chinese comments** for business logic (exported types/fields/functions)
+- **Go doc comments** use `// FunctionName 功能描述` format
+- **JSON tags** required on all serializable struct fields
+- **Error wrapping** with `fmt.Errorf("上下文: %v", err)` — never discard errors
+- **Logging**: `log.Printf` / `log.Fatalf` (not `println`, not `fmt.Println` for errors)
+- **Concurrency**: `sync.RWMutex` for shared state; always `defer mu.Unlock()`
+- **Imports**: stdlib → third-party → `ruoyi-proxy/internal/...` (three groups, blank lines between)
 
-### HTTP Handlers
+## Agent Module Key Design
 
-```go
-func (p *Proxy) HandleProxy(w http.ResponseWriter, r *http.Request) {
-    // Set headers
-    r.Header.Set("X-Proxy-Service", serviceID)
-    r.Header.Set("X-Proxy-Env", svcCfg.ActiveEnv)
-    r.Header.Set("X-Proxy-Time", time.Now().Format("2006-01-02 15:04:05"))
-    
-    // Delegate to reverse proxy
-    proxy.ServeHTTP(w, r)
-}
-```
+- ReAct loop: think (LLM stream) → act (execute tools) → observe (feed results back), up to 30 rounds
+- Auto-resume: up to 5 continuation injections (150 effective rounds max)
+- Write tools require confirmation UI unless user already approved this turn
+- `run_shell` with read-only commands (ls, cat, grep, systemctl status, etc.) skips confirmation
+- Important files auto-backed up to `~/.ruoyi-backup/<timestamp>/` before modification
+- Tool output truncated to 3000 chars; Anthropic requires non-empty tool result strings
+- AI config stored in `configs/app_config.json` under `"ai"` key, not a separate file
 
-### Shell Script Integration
+## CLI Architecture
 
-The project embeds shell scripts using `//go:embed`:
-
-```go
-//go:embed scripts/*
-var scriptsFS embed.FS
-
-//go:embed configs/*
-var configsFS embed.FS
-```
-
-When modifying scripts in `scripts/` or `configs/`, run `make sync` before building to copy them to `cmd/proxy/`.
-
-## Commit Message Format
-
-Follow conventional commits:
-
-- `feat:` 新功能
-- `fix:` Bug 修复
-- `docs:` 文档更新
-- `style:` 代码格式调整
-- `refactor:` 代码重构
-- `test:` 测试相关
-- `chore:` 构建/工具相关
+- Uses `github.com/chzyer/readline` for tab completion and prompt management
+- Service commands (start/stop/deploy/logs) call `service.sh` via `bash` with env vars:
+  `SERVICE_ID`, `APP_NAME`, `APP_JAR_PATTERN`, `BLUE_PORT`, `GREEN_PORT`, `APP_HOME`
+- `APP_HOME` is derived from `scripts/service.sh` location (two levels up)
+- Proxy process management: start via `exec.Command`, stop via PID kill or port-lookup
 
 ## Important Notes
 
-1. **Always run `make sync` before building** if you modified scripts or configs
-2. **Scripts are embedded** - changes to `scripts/` or `configs/` require rebuild
-3. **No tests exist yet** - add tests to `*_test.go` files when implementing
-4. **Use Chinese comments** for business logic to match project style
-5. **Platform support**: Windows (dev), Linux (deployment target)
+1. `make build` includes sync — no separate `make sync` needed before building
+2. Scripts/configs changes require recompile (embedded at build time)
+3. No test files exist; add `*_test.go` alongside source files
+4. `internal/handler/` and `internal/sync/` are empty and should stay that way until explicitly developed
+5. Platform: Windows (dev), Linux (deployment); `build.bat` defaults to Linux cross-compile
+6. Config output goes to `bin/ruoyi-proxy` (current platform) or `bin/ruoyi-proxy-linux` (Linux)
