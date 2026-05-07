@@ -920,6 +920,63 @@ deploy() {
     echo -e "${GREEN}访问地址: http://localhost:$PROXY_PORT${NC}"
 }
 
+# 低内存部署：先停旧服务，再启动新服务
+deploy_lowmem() {
+    echo -e "${BLUE}=== 低内存部署开始 ===${NC}"
+
+    local new_jar=$(get_current_jar) || return 1
+    local current_env=$(get_active_env)
+    local old_port=$(get_env_port "$current_env")
+
+    echo -e "${CYAN}当前环境: $current_env${NC}"
+    echo -e "${CYAN}JAR文件: $new_jar${NC}"
+    echo -e "${YELLOW}低内存模式将先停止当前环境，再在原环境启动新版本${NC}"
+
+    echo -e "${YELLOW}停止当前环境...${NC}"
+    stop_env "$current_env"
+
+    if ! wait_port_release "$old_port" 10; then
+        echo -e "${RED}旧环境端口未释放，终止部署${NC}"
+        return 1
+    fi
+
+    if [ "$(check_proxy_status)" != "running" ]; then
+        if ! start_proxy; then
+            echo -e "${RED}代理程序启动失败${NC}"
+            return 1
+        fi
+    fi
+
+    echo -e "${YELLOW}启动新版本...${NC}"
+    if ! start_env "$current_env" "$new_jar"; then
+        echo -e "${RED}新版本启动失败${NC}"
+        return 1
+    fi
+
+    if ! health_check "$current_env" 5; then
+        echo -e "${RED}健康检查失败，请检查日志后手动处理${NC}"
+        local log_file=$(get_env_log_file "$current_env")
+        if [ -f "$log_file" ]; then
+            echo -e "${CYAN}--- 最近30行日志 ---${NC}"
+            tail -n 30 "$log_file"
+            echo -e "${CYAN}--- 日志结束 ---${NC}"
+        fi
+        return 1
+    fi
+
+    echo -e "${YELLOW}校准代理流量...${NC}"
+    if ! switch_env "$current_env"; then
+        echo -e "${RED}代理流量校准失败${NC}"
+        return 1
+    fi
+
+    cleanup
+
+    echo -e "${GREEN}低内存部署完成!${NC}"
+    echo -e "${GREEN}当前环境: $current_env${NC}"
+    echo -e "${GREEN}访问地址: http://localhost:$PROXY_PORT${NC}"
+}
+
 # 查看状态
 status() {
     echo -e "${BLUE}=== 服务状态 ===${NC}"
@@ -1319,6 +1376,7 @@ help() {
     echo "  stop           - 停止服务"  
     echo "  restart        - 重启服务"
     echo "  deploy         - 蓝绿部署新版本"
+    echo "  deploy-lowmem  - 低内存部署（先停旧服务再启动新服务）"
     echo "  status         - 查看状态"
     echo "  logs [行数]    - 查看日志（默认600行）"
     echo "  logs-follow    - 实时日志"
@@ -1356,6 +1414,9 @@ case "$1" in
         ;;
     deploy)
         deploy
+        ;;
+    deploy-lowmem)
+        deploy_lowmem
         ;;
     status)
         status

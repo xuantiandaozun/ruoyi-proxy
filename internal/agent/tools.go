@@ -132,14 +132,14 @@ var AllTools = []ToolDef{
 	// ── 写操作工具（需用户确认）──────────────────────────────
 	{
 		Name:        "service_control",
-		Description: "控制若依应用服务：start（启动）、stop（停止）、restart（重启）、deploy（蓝绿部署）。需要用户确认",
+		Description: "控制若依应用服务：start（启动）、stop（停止）、restart（重启）、deploy（蓝绿部署）、deploy-lowmem（低内存部署）。需要用户确认",
 		ReadOnly:    false,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action": map[string]interface{}{
 					"type":        "string",
-					"enum":        []string{"start", "stop", "restart", "deploy"},
+					"enum":        []string{"start", "stop", "restart", "deploy", "deploy-lowmem"},
 					"description": "要执行的操作",
 				},
 			},
@@ -743,7 +743,7 @@ func (e *ToolExecutor) serviceControl(action string) (string, error) {
 	if e.execCtx.ScriptPath == "" {
 		return "", fmt.Errorf("未找到 service.sh 脚本")
 	}
-	if action != "start" && action != "stop" && action != "restart" && action != "deploy" {
+	if action != "start" && action != "stop" && action != "restart" && action != "deploy" && action != "deploy-lowmem" {
 		return "", fmt.Errorf("无效操作: %s", action)
 	}
 

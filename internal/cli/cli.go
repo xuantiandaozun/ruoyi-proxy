@@ -56,6 +56,7 @@ func (c *CLI) Start() {
 		readline.PcItem("stop"),
 		readline.PcItem("restart"),
 		readline.PcItem("deploy"),
+		readline.PcItem("deploy-lowmem"),
 		readline.PcItem("status"),
 		readline.PcItem("exit"),
 		readline.PcItem("clear"),
@@ -410,6 +411,7 @@ func (c *CLI) printHelp() {
 	fmt.Println("    stop           - 停止服务")
 	fmt.Println("    restart        - 重启服务")
 	fmt.Println("    deploy         - 蓝绿部署新版本")
+	fmt.Println("    deploy-lowmem  - 低内存部署（先停旧服务再启动新服务）")
 	fmt.Println("    quick-deploy   - 快速部署向导")
 	fmt.Println("    status         - 查看服务状态")
 	fmt.Println("    detail         - 查看详细状态")
@@ -492,6 +494,9 @@ func (c *CLI) handleCommand(input string) {
 
 	case "deploy":
 		c.executeServiceCommand("deploy")
+
+	case "deploy-lowmem":
+		c.executeServiceCommand("deploy-lowmem")
 
 	case "status":
 		c.executeServiceCommand("status")

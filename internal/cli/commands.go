@@ -353,6 +353,7 @@ func (c *CLI) ShowQuickCommands() {
 		{"stop", "停止服务"},
 		{"restart", "重启服务"},
 		{"deploy", "蓝绿部署"},
+		{"deploy-lowmem", "低内存部署"},
 		{"status", "查看状态"},
 		{"logs", "查看日志"},
 		{"switch", "交互式切换环境"},
