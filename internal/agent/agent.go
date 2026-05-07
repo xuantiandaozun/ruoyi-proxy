@@ -3,8 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/glamour"
 )
@@ -13,7 +16,11 @@ const (
 	maxReActIterations = 30 // 单次 ReAct 最大推理轮数
 	maxAutoResume      = 5  // 超限后最多自动续接次数（总计最多 30×5=150 轮）
 	toolOutputMaxChars = 3000
+	autoResumePrompt   = "请继续完成上面未完成的任务。"
+	autoTitleTurns     = 5
 )
+
+var errAgentInterrupted = errors.New("agent interrupted")
 
 // Agent AI 对话代理，实现 ReAct 循环
 type Agent struct {
@@ -22,8 +29,13 @@ type Agent struct {
 	ctx          *ContextManager
 	aiCfg        AIConfig
 	execCtx      ExecContext
-	lastInput    string // 用户最后一条消息，用于判断是否已提前确认
-	turnApproved bool   // 当前用户轮次是否已批准写操作（一次批准覆盖整轮）
+	sessionStore *SessionStore
+	current      *SessionMeta
+	systemPrompt string
+	runMu        sync.Mutex
+	runCancel    context.CancelFunc // 当前用户轮次的取消函数，用于 Ctrl+C 打断任务
+	lastInput    string             // 用户最后一条消息，用于判断是否已提前确认
+	turnApproved bool               // 当前用户轮次是否已批准写操作（一次批准覆盖整轮）
 	// 回调函数（由 CLI 注入）
 	confirm   func(prompt string) bool           // 写操作确认
 	readInput func(prompt string) (string, error) // 读用户输入
@@ -42,48 +54,74 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	store, err := NewSessionStore()
+	if err != nil {
+		return nil, fmt.Errorf("初始化会话存储失败: %v", err)
+	}
 	return &Agent{
-		provider:  provider,
-		executor:  NewToolExecutor(execCtx),
-		ctx:       NewContextManager(aiCfg.ContextLimit),
-		aiCfg:     aiCfg,
-		execCtx:   execCtx,
-		confirm:   confirm,
-		readInput: readInput,
-		print:     print,
+		provider:     provider,
+		executor:     NewToolExecutor(execCtx),
+		ctx:          NewContextManager(aiCfg.ContextLimit),
+		aiCfg:        aiCfg,
+		execCtx:      execCtx,
+		sessionStore: store,
+		confirm:      confirm,
+		readInput:    readInput,
+		print:        print,
 	}, nil
+}
+
+// Cancel 取消当前执行中的用户轮次，不退出 Agent 模式。
+func (a *Agent) Cancel() {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	if a.runCancel != nil {
+		a.runCancel()
+	}
 }
 
 // Run 启动 Agent 交互循环
 func (a *Agent) Run() {
-	// 系统提示词
-	systemPrompt := a.aiCfg.SystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = a.defaultSystemPrompt()
+	a.systemPrompt = a.aiCfg.SystemPrompt
+	if a.systemPrompt == "" {
+		a.systemPrompt = a.defaultSystemPrompt()
 	}
-	a.ctx.Add(Message{Role: "system", Content: systemPrompt})
+	if err := a.startNewSession(); err != nil {
+		a.print(fmt.Sprintf("\033[1;31m✗ 创建初始会话失败: %v\033[0m", err))
+		return
+	}
 
 	a.print(fmt.Sprintf("\n\033[1;34m═══ AI Agent 模式 ═══\033[0m"))
 	a.print(fmt.Sprintf("提供商: \033[1;36m%s\033[0m  模型: \033[1;36m%s\033[0m",
 		a.aiCfg.Provider, a.aiCfg.Model))
-	a.print("输入问题或指令，\033[1;33m'exit'\033[0m 退出，\033[1;33m'clear'\033[0m 清空历史\n")
+	a.print("输入问题或指令，\033[1;33m'exit'\033[0m 退出，\033[1;33m'clear'\033[0m 清空当前会话")
+	a.print("\033[1;33m'Ctrl+C'\033[0m 中断当前任务，\033[1;33m'/sessions'\033[0m 查看会话，\033[1;33m'/load'\033[0m 切换会话，\033[1;33m'/new'\033[0m 新建会话\n")
 
 	for {
 		input, err := a.readInput("\033[1;32mYou\033[0m: ")
 		if err != nil {
+			a.persistSession()
 			break
 		}
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
+		if strings.HasPrefix(input, "/") {
+			if ok := a.handleSlashCommand(input); !ok {
+				return
+			}
+			continue
+		}
 		switch strings.ToLower(input) {
 		case "exit", "quit", "q":
+			a.persistSession()
 			a.print("已退出 Agent 模式")
 			return
 		case "clear":
 			a.ctx.Clear()
-			a.ctx.Add(Message{Role: "system", Content: systemPrompt})
+			a.ctx.ReplaceSystem(a.systemPrompt)
+			a.persistSession()
 			a.print("\033[1;36mℹ 对话历史已清空\033[0m")
 			continue
 		case "history":
@@ -94,16 +132,206 @@ func (a *Agent) Run() {
 		a.lastInput = input    // 记录用户最后一条消息，供写操作确认使用
 		a.turnApproved = false // 新用户轮次，重置批准状态
 		a.ctx.Add(Message{Role: "user", Content: input})
+		a.persistSession()
 		if err := a.runReAct(); err != nil {
+			if errors.Is(err, errAgentInterrupted) {
+				a.print("\n\033[1;33m◉ 已中断当前任务\033[0m\n")
+				continue
+			}
 			a.print(fmt.Sprintf("\n\033[1;31m✗ 错误: %v\033[0m\n", err))
+			continue
 		}
+		a.maybeAutoTitle()
+		a.persistSession()
 	}
+}
+
+func (a *Agent) handleSlashCommand(input string) bool {
+	parts := strings.Fields(strings.TrimSpace(input))
+	cmd := strings.ToLower(parts[0])
+	arg := ""
+	if len(parts) > 1 {
+		arg = strings.TrimSpace(strings.Join(parts[1:], " "))
+	}
+	if cmd == "/" {
+		selected, ok, err := selectSlashCommandInteractive([]slashCommandItem{
+			{Command: "/sessions", Description: "查看历史会话列表"},
+			{Command: "/load", Description: "打开会话选择器并加载"},
+			{Command: "/new", Description: "创建新的空会话"},
+			{Command: "/current", Description: "查看当前会话信息"},
+			{Command: "/help", Description: "查看 Agent 命令说明"},
+			{Command: "/exit", Description: "退出 Agent 模式"},
+		}, a.readInput)
+		if err != nil || !ok {
+			return true
+		}
+		cmd = selected
+	}
+
+	switch cmd {
+	case "/help":
+		a.print("/sessions 查看历史会话，/load [编号|ID] 加载会话，/new 新建会话，/current 查看当前会话，/exit 退出")
+		return true
+	case "/sessions":
+		a.showSessions()
+		return true
+	case "/load":
+		if err := a.loadSessionByRef(arg); err != nil {
+			a.print(fmt.Sprintf("\033[1;31m✗ %v\033[0m", err))
+		}
+		return true
+	case "/new":
+		a.persistSession()
+		if err := a.startNewSession(); err != nil {
+			a.print(fmt.Sprintf("\033[1;31m✗ 新建会话失败: %v\033[0m", err))
+		} else {
+			a.print(fmt.Sprintf("\033[1;36mℹ 已创建新会话: %s (%s)\033[0m", a.current.Title, a.current.ID))
+		}
+		return true
+	case "/current":
+		if a.current != nil {
+			a.print(fmt.Sprintf("\033[1;36mℹ 当前会话: %s (%s)\033[0m", a.current.Title, a.current.ID))
+		}
+		return true
+	case "/exit":
+		a.persistSession()
+		a.print("已退出 Agent 模式")
+		return false
+	default:
+		a.print("\033[1;33m⚠ 未知命令，输入 /help 查看会话命令\033[0m")
+		return true
+	}
+}
+
+func (a *Agent) startNewSession() error {
+	a.ctx = NewContextManager(a.aiCfg.ContextLimit)
+	a.ctx.Add(Message{Role: "system", Content: a.systemPrompt})
+	meta, err := a.sessionStore.CreateSession(a.ctx.Messages())
+	if err != nil {
+		return err
+	}
+	a.current = meta
+	return nil
+}
+
+func (a *Agent) persistSession() {
+	if a.current == nil {
+		return
+	}
+	if err := a.sessionStore.SaveSession(a.current, a.ctx.Messages()); err != nil {
+		a.print(fmt.Sprintf("\033[1;31m✗ 保存会话失败: %v\033[0m", err))
+	}
+}
+
+func (a *Agent) showSessions() {
+	items, err := a.sessionStore.ListSessions()
+	if err != nil {
+		a.print(fmt.Sprintf("\033[1;31m✗ 读取会话列表失败: %v\033[0m", err))
+		return
+	}
+	a.print(formatSessionList(items))
+	a.print("\033[1;36mℹ 使用 /load 打开交互式会话选择器\033[0m")
+}
+
+func (a *Agent) loadSessionByRef(ref string) error {
+	a.persistSession()
+	items, err := a.sessionStore.ListSessions()
+	if err != nil {
+		return fmt.Errorf("读取会话列表失败: %v", err)
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("暂无可加载的历史会话")
+	}
+	if strings.TrimSpace(ref) == "" {
+		choice, ok, err := selectSessionInteractive(items, a.currentID(), a.readInput)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		ref = choice
+	}
+	id, err := a.sessionStore.ResolveSessionID(ref)
+	if err != nil {
+		return err
+	}
+	meta, messages, err := a.sessionStore.LoadSession(id)
+	if err != nil {
+		return fmt.Errorf("加载会话失败: %v", err)
+	}
+	a.ctx = NewContextManager(a.aiCfg.ContextLimit)
+	for _, msg := range messages {
+		a.ctx.Add(msg)
+	}
+	a.ctx.ReplaceSystem(a.systemPrompt)
+	a.current = meta
+	a.persistSession()
+	a.print(fmt.Sprintf("\033[1;36mℹ 已加载会话: %s (%s)\033[0m", meta.Title, meta.ID))
+	a.print("\033[1;36mℹ " + a.ctx.Summary() + "\033[0m")
+	return nil
+}
+
+func (a *Agent) currentID() string {
+	if a.current == nil {
+		return ""
+	}
+	return a.current.ID
+}
+
+func (a *Agent) maybeAutoTitle() {
+	if a.current == nil || a.current.AutoTitled {
+		return
+	}
+	if countRealUserTurns(a.ctx.Messages()) < autoTitleTurns {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	title, err := a.generateSessionTitle(ctx)
+	if err != nil || title == "" {
+		return
+	}
+	a.current.Title = title
+	a.current.AutoTitled = true
+	a.persistSession()
+	a.print(fmt.Sprintf("\033[1;36mℹ 会话已命名为: %s\033[0m", title))
+}
+
+func (a *Agent) generateSessionTitle(ctx context.Context) (string, error) {
+	snippet := buildTitleSnippet(a.ctx.Messages())
+	if snippet == "" {
+		return "", nil
+	}
+	resp, err := a.provider.Chat(ctx, []Message{
+		{Role: "system", Content: "你是会话标题生成器。请基于给定对话内容，输出一个 8 到 18 个字的中文标题，只输出标题本身，不要解释，不要引号，不要序号。"},
+		{Role: "user", Content: snippet},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	title := sanitizeSessionTitle(resp.Content)
+	if title == "" {
+		return "", nil
+	}
+	return title, nil
 }
 
 // runReAct 执行 ReAct 循环，支持自动续接
 func (a *Agent) runReAct() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.runMu.Lock()
+	a.runCancel = cancel
+	a.runMu.Unlock()
+	defer func() {
+		cancel()
+		a.runMu.Lock()
+		a.runCancel = nil
+		a.runMu.Unlock()
+	}()
+
 	for resume := 0; resume <= maxAutoResume; resume++ {
-		done, err := a.runReActOnce()
+		done, err := a.runReActOnce(ctx)
 		if err != nil {
 			return err
 		}
@@ -117,7 +345,7 @@ func (a *Agent) runReAct() error {
 			// 注入续接消息，让 AI 知道需要继续
 			a.ctx.Add(Message{
 				Role:    "user",
-				Content: "请继续完成上面未完成的任务。",
+				Content: autoResumePrompt,
 			})
 		}
 	}
@@ -127,13 +355,22 @@ func (a *Agent) runReAct() error {
 
 // runReActOnce 执行单次 ReAct 循环，返回 (是否正常完成, error)
 // 返回 false, nil 表示达到迭代上限，需要续接
-func (a *Agent) runReActOnce() (bool, error) {
-	bgCtx := context.Background()
-
+func (a *Agent) runReActOnce(ctx context.Context) (bool, error) {
 	for iter := 0; iter < maxReActIterations; iter++ {
+		// 检查用户是否中断
+		select {
+		case <-ctx.Done():
+			return false, errAgentInterrupted
+		default:
+		}
+
 		// —— Think：调用 LLM ——
-		eventCh, err := a.provider.Stream(bgCtx, a.ctx.Messages(), AllTools)
+		eventCh, err := a.provider.Stream(ctx, a.ctx.Messages(), AllTools)
 		if err != nil {
+			// 区分取消错误和真实错误
+			if ctx.Err() != nil {
+				return false, errAgentInterrupted
+			}
 			return false, fmt.Errorf("调用 AI 失败: %v", err)
 		}
 
@@ -145,6 +382,15 @@ func (a *Agent) runReActOnce() (bool, error) {
 		ms := newMDStream()
 
 		for event := range eventCh {
+			// 流式输出过程中也检查中断
+			select {
+			case <-ctx.Done():
+				ms.finish()
+				fmt.Println()
+				return false, errAgentInterrupted
+			default:
+			}
+
 			switch event.Type {
 			case "text":
 				ms.feed(event.Text)
@@ -179,6 +425,13 @@ func (a *Agent) runReActOnce() (bool, error) {
 
 		// —— Act + Observe：执行工具调用 ——
 		for _, tc := range toolCalls {
+			// 执行前再次检查中断
+			select {
+			case <-ctx.Done():
+				return false, errAgentInterrupted
+			default:
+			}
+
 			result, err := a.executeToolCall(tc)
 			content := result
 			if err != nil {
@@ -346,6 +599,40 @@ func (a *Agent) defaultSystemPrompt() string {
 - 使用中文，简洁明了
 - 执行操作后说明结果和影响
 - 遇到问题主动建议下一步排查方向`, a.execCtx.CurrentService)
+}
+
+func buildTitleSnippet(messages []Message) string {
+	var lines []string
+	for _, msg := range messages {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" || content == autoResumePrompt {
+			continue
+		}
+		label := "用户"
+		if msg.Role == "assistant" {
+			label = "助手"
+		}
+		lines = append(lines, label+": "+trimRunes(strings.ReplaceAll(content, "\n", " "), 120))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > 12 {
+		lines = lines[len(lines)-12:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sanitizeSessionTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.Trim(title, "\"'“”‘’`")
+	title = strings.ReplaceAll(title, "\r", " ")
+	title = strings.ReplaceAll(title, "\n", " ")
+	title = strings.Join(strings.Fields(title), " ")
+	return trimRunes(title, 18)
 }
 
 func min(a, b int) int {

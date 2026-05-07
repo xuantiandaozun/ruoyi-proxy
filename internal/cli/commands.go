@@ -152,15 +152,7 @@ func (c *CLI) QuickDeploy() {
 		fmt.Printf("  [%d/%d] %s\n", i+1, len(steps), step)
 	}
 
-	fmt.Print("\n\033[1;33m确认开始部署 (y/n): \033[0m")
-	confirm, err := c.readLine()
-	if err != nil {
-		return
-	}
-
-	confirm = strings.ToLower(strings.TrimSpace(confirm))
-	if confirm != "y" && confirm != "yes" {
-		c.printInfo("已取消")
+	if !c.confirmDangerAction("开始快速部署", []string{"将按部署向导依次执行启动、健康检查、切换流量等步骤。"}) {
 		return
 	}
 
@@ -206,32 +198,30 @@ func (c *CLI) InteractiveSwitch() {
 	fmt.Println("  2. 切换单个服务")
 	fmt.Println("  0. 取消")
 
-	choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
-	if err != nil {
+	choice, ok := c.selectSimpleMenu("选择切换方式", []string{"切换所有服务", "切换单个服务", "取消"}, 0)
+	if !ok {
+		c.printInfo("已取消")
 		return
 	}
 
-	switch strings.TrimSpace(choice) {
-	case "1":
+	switch choice {
+	case 0:
 		c.switchAllServices()
-	case "2":
+	case 1:
 		c.switchSingleService(services)
-	case "0":
-		c.printInfo("已取消")
 	default:
-		c.printError("无效选择")
+		c.printInfo("已取消")
 	}
 }
 
 // switchAllServices 切换所有服务
 func (c *CLI) switchAllServices() {
-	env, err := c.readLineWithPrompt("\033[1;33m目标环境 (blue/green): \033[0m")
-	if err != nil {
+	env, ok := c.selectEnvMenu(-1)
+	if !ok {
+		c.printInfo("已取消")
 		return
 	}
-	env = strings.TrimSpace(env)
-	if env != "blue" && env != "green" {
-		c.printError("环境必须是 blue 或 green")
+	if !c.confirmDangerAction(fmt.Sprintf("切换所有服务到 %s", env), []string{"该操作会批量修改所有服务的活跃环境配置。"}) {
 		return
 	}
 
@@ -256,31 +246,17 @@ func (c *CLI) switchAllServices() {
 
 // switchSingleService 切换单个服务
 func (c *CLI) switchSingleService(services []ServiceStatus) {
-	serviceID, err := c.readLineWithPrompt("\033[1;33m服务ID: \033[0m")
-	if err != nil {
+	serviceID, ok := c.selectServiceStatusMenu(services)
+	if !ok {
+		c.printInfo("已取消")
 		return
 	}
-	serviceID = strings.TrimSpace(serviceID)
-
-	found := false
-	for _, svc := range services {
-		if svc.ID == serviceID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		c.printError(fmt.Sprintf("服务不存在: %s", serviceID))
+	env, ok := c.selectEnvMenu(-1)
+	if !ok {
+		c.printInfo("已取消")
 		return
 	}
-
-	env, err := c.readLineWithPrompt("\033[1;33m目标环境 (blue/green): \033[0m")
-	if err != nil {
-		return
-	}
-	env = strings.TrimSpace(env)
-	if env != "blue" && env != "green" {
-		c.printError("环境必须是 blue 或 green")
+	if !c.confirmDangerAction(fmt.Sprintf("切换服务[%s]到 %s", serviceID, env), []string{"该操作会修改该服务的活跃环境配置。"}) {
 		return
 	}
 
@@ -304,6 +280,33 @@ func (c *CLI) switchSingleService(services []ServiceStatus) {
 
 	c.printSuccess(fmt.Sprintf("服务[%s]已切换到 %s (配置已更新)", serviceID, env))
 	c.promptProxyRestart()
+}
+
+func (c *CLI) selectEnvMenu(current int) (string, bool) {
+	idx, ok := c.selectSimpleMenu("目标环境", []string{"blue", "green"}, current)
+	if !ok {
+		return "", false
+	}
+	if idx == 0 {
+		return "blue", true
+	}
+	return "green", true
+}
+
+func (c *CLI) selectServiceStatusMenu(services []ServiceStatus) (string, bool) {
+	options := make([]string, 0, len(services))
+	selected := 0
+	for i, svc := range services {
+		options = append(options, fmt.Sprintf("%-12s  %s  [%s]", svc.ID, svc.Name, svc.ActiveEnv))
+		if svc.ID == c.currentService {
+			selected = i
+		}
+	}
+	idx, ok := c.selectSimpleMenu("选择服务", options, selected)
+	if !ok {
+		return "", false
+	}
+	return services[idx].ID, true
 }
 
 // ShowSystemInfo 显示系统信息
@@ -441,40 +444,59 @@ func (c *CLI) JVMConfig() {
 		fmt.Println("  3. 查看详细配置")
 		fmt.Println("  0. 返回")
 
-		choice, err := c.readLineWithPrompt("\n\033[1;33m请选择: \033[0m")
-		if err != nil {
+		choice, ok := c.selectSimpleMenu("JVM 配置操作", []string{
+			"切换预设档位",
+			"设置自定义参数",
+			"查看详细配置",
+			"返回",
+		}, 0)
+		if !ok || choice == 3 {
 			return
 		}
 
-		switch strings.TrimSpace(choice) {
-		case "1":
+		switch choice {
+		case 0:
 			c.switchJVMPreset(appConfig, jvm)
-		case "2":
+		case 1:
 			c.setJVMCustomOpts(appConfig, jvm)
-		case "3":
+		case 2:
 			c.showJVMDetail(jvm)
-		case "0":
-			return
-		default:
-			c.printError("无效选择")
 		}
 	}
 }
 
 // switchJVMPreset 切换JVM预设档位
 func (c *CLI) switchJVMPreset(appConfig map[string]interface{}, jvm map[string]interface{}) {
-	choice, err := c.readLineWithPrompt("\033[1;33m选择预设档位 (1-3): \033[0m")
-	if err != nil {
+	presets, ok := jvm["presets"].(map[string]interface{})
+	if !ok {
+		c.printError("预设配置不存在")
 		return
 	}
-
-	presetNum := strings.TrimSpace(choice)
-	if presetNum != "1" && presetNum != "2" && presetNum != "3" {
-		c.printError("无效的预设档位，必须是1、2或3")
+	options := make([]string, 0, 3)
+	currentPreset := int(jvm["preset"].(float64))
+	selected := 0
+	for i := 1; i <= 3; i++ {
+		key := fmt.Sprintf("%d", i)
+		preset, ok := presets[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name := preset["name"].(string)
+		xms := preset["xms"].(string)
+		xmx := preset["xmx"].(string)
+		gcThreads := int(preset["gc_threads"].(float64))
+		line := fmt.Sprintf("档位 %d  %s  堆:%s-%s  GC线程:%d", i, name, xms, xmx, gcThreads)
+		options = append(options, line)
+		if i == currentPreset {
+			selected = len(options) - 1
+		}
+	}
+	choice, ok := c.selectSimpleMenu("选择 JVM 预设档位", options, selected)
+	if !ok {
+		c.printInfo("已取消")
 		return
 	}
-
-	num := int(presetNum[0] - '0')
+	num := choice + 1
 	jvm["preset"] = float64(num)
 	appConfig["jvm"] = jvm
 
@@ -483,7 +505,7 @@ func (c *CLI) switchJVMPreset(appConfig map[string]interface{}, jvm map[string]i
 		return
 	}
 
-	c.printSuccess(fmt.Sprintf("JVM预设已切换到档位 %s", presetNum))
+	c.printSuccess(fmt.Sprintf("JVM预设已切换到档位 %d", num))
 	c.printInfo("重启Java应用后生效")
 }
 
@@ -667,6 +689,10 @@ func (c *CLI) StartAgent() {
 		fmt.Printf("\033[1;31m✗ 创建 Agent 失败: %v\033[0m\n", err)
 		return
 	}
+
+	c.agentCancel = a.Cancel
+	defer func() { c.agentCancel = nil }()
+
 	a.Run()
 }
 
@@ -689,18 +715,23 @@ func (c *CLI) AgentConfig() {
 	fmt.Println("  3) ollama     (本地模型)")
 	fmt.Println("  0) 取消")
 
-	choice, err := c.readLineWithPrompt("请选择 (0-3): ")
-	if err != nil || strings.TrimSpace(choice) == "0" {
+	choice, ok := c.selectSimpleMenu("选择提供商", []string{
+		"anthropic  (Claude)",
+		"openai     (GPT / 兼容 API)",
+		"ollama     (本地模型)",
+		"取消",
+	}, 0)
+	if !ok || choice == 3 {
 		return
 	}
 
 	var provider string
-	switch strings.TrimSpace(choice) {
-	case "1":
+	switch choice {
+	case 0:
 		provider = "anthropic"
-	case "2":
+	case 1:
 		provider = "openai"
-	case "3":
+	case 2:
 		provider = "ollama"
 	default:
 		fmt.Println("\033[1;31m✗ 无效选择\033[0m")

@@ -26,6 +26,7 @@ type CLI struct {
 	running        bool
 	proxyPID       int    // 保存代理进程的PID
 	currentService string // 当前操作的服务ID
+	agentCancel    func() // Agent 取消函数，用于 Ctrl+C 中断 ReAct 循环
 }
 
 // New 创建CLI实例
@@ -46,6 +47,7 @@ func (c *CLI) Start() {
 		return
 	}
 	defer c.rl.Close()
+	c.setMainPrompt()
 
 	// 设置自动完成
 	c.rl.Config.AutoComplete = readline.NewPrefixCompleter(
@@ -84,6 +86,7 @@ func (c *CLI) Start() {
 		readline.PcItem("service-add"),
 		readline.PcItem("service-list"),
 		readline.PcItem("service-remove"),
+		readline.PcItem("service-switch"),
 		readline.PcItem("jvm-config"),
 		readline.PcItem("agent"),
 		readline.PcItem("agent-config"),
@@ -102,9 +105,15 @@ func (c *CLI) Start() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		<-sigChan
-		fmt.Println()
-		c.running = false
+		for range sigChan {
+			fmt.Println()
+			if c.agentCancel != nil {
+				c.agentCancel()
+				continue
+			}
+			c.running = false
+			return
+		}
 	}()
 
 	for c.running {
@@ -148,6 +157,232 @@ func (c *CLI) readLineWithPrompt(prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+func (c *CLI) setMainPrompt() {
+	if c.rl == nil {
+		return
+	}
+	c.rl.SetPrompt(fmt.Sprintf("\033[1;36mruoyi[%s]>\033[0m ", c.currentService))
+}
+
+func (c *CLI) selectSimpleMenu(title string, options []string, selected int) (int, bool) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return c.selectSimpleMenuFallback(title, options)
+	}
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return c.selectSimpleMenuFallback(title, options)
+	}
+	defer term.Restore(fd, oldState)
+
+	hideCursor := func() { fmt.Print("\033[?25l") }
+	showCursor := func() { fmt.Print("\033[?25h") }
+	hideCursor()
+	defer showCursor()
+
+	_, height, err := term.GetSize(fd)
+	if err != nil || height < 8 {
+		height = 12
+	}
+	maxVisible := height - 4
+	if maxVisible < 5 {
+		maxVisible = 5
+	}
+	if selected < 0 || selected >= len(options) {
+		selected = 0
+	}
+	start := 0
+	renderedLines := 0
+	reader := bufio.NewReader(os.Stdin)
+
+	render := func() {
+		if renderedLines > 0 {
+			fmt.Printf("\033[%dA", renderedLines)
+			fmt.Print("\r\033[0J")
+		}
+		fmt.Printf("\r\033[1;33m%s（↑/↓ 或 j/k 选择，Enter 确认，Esc 取消）:\033[0m\r\n", title)
+		renderedLines = 1
+		if selected < start {
+			start = selected
+		} else if selected >= start+maxVisible {
+			start = selected - maxVisible + 1
+		}
+		end := start + maxVisible
+		if end > len(options) {
+			end = len(options)
+		}
+		for i := start; i < end; i++ {
+			line := options[i]
+			prefix := "  "
+			if i == selected {
+				prefix = "\033[1;32m> \033[0m"
+				line = "\033[1;32m" + line + "\033[0m"
+			}
+			fmt.Printf("\r%s%s\r\n", prefix, line)
+			renderedLines++
+		}
+	}
+
+	readKey := func() rune {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0
+		}
+		if b == 0x1b {
+			next, _ := reader.ReadByte()
+			if next == '[' {
+				third, _ := reader.ReadByte()
+				switch third {
+				case 'A':
+					return 'U'
+				case 'B':
+					return 'D'
+				}
+			}
+			return 0x1b
+		}
+		return rune(b)
+	}
+
+	render()
+	for {
+		switch readKey() {
+		case 'U', 'k', 'K':
+			if selected > 0 {
+				selected--
+				render()
+			}
+		case 'D', 'j', 'J':
+			if selected < len(options)-1 {
+				selected++
+				render()
+			}
+		case '\r', '\n':
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			return selected, true
+		case 0x1b, 3:
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			return -1, false
+		}
+	}
+}
+
+func (c *CLI) selectSimpleMenuFallback(title string, options []string) (int, bool) {
+	fmt.Printf("\033[1;33m%s:\033[0m\n", title)
+	for i, option := range options {
+		fmt.Printf("  %d. %s\n", i+1, option)
+	}
+	choice, err := c.readLineWithPrompt("\033[1;33m请选择编号（回车取消）: \033[0m")
+	if err != nil || strings.TrimSpace(choice) == "" {
+		return -1, false
+	}
+	idx := 0
+	if n, err := fmt.Sscanf(choice, "%d", &idx); err == nil && n == 1 && idx > 0 && idx <= len(options) {
+		return idx - 1, true
+	}
+	c.printError("无效选择")
+	return -1, false
+}
+
+func (c *CLI) confirmDangerAction(title string, lines []string) bool {
+	printDangerConfirmBox(title, lines)
+	input, err := c.readLineWithPrompt("")
+	if err != nil {
+		c.printInfo("已取消")
+		return false
+	}
+	confirm := strings.ToLower(strings.TrimSpace(input))
+	if confirm == "" || confirm == "y" || confirm == "yes" || confirm == "ok" {
+		return true
+	}
+	c.printInfo("已取消")
+	return false
+}
+
+func printDangerConfirmBox(title string, lines []string) {
+	const w = 56
+	border := strings.Repeat("─", w)
+	row := func(color, text string) {
+		pad := w - visibleWidthCLI(text)
+		if pad < 0 {
+			pad = 0
+		}
+		fmt.Printf("\033[1;33m│\033[0m%s%s%s\033[1;33m│\033[0m\n", color, text, strings.Repeat(" ", pad))
+	}
+	printWrapped := func(prefix, content string) {
+		maxContent := w - visibleWidthCLI(prefix)
+		wrapped := splitToWidthCLI(content, maxContent)
+		for i, line := range wrapped {
+			if i == 0 {
+				row("\033[1;33m", prefix+line)
+				continue
+			}
+			row("\033[1;33m", strings.Repeat(" ", visibleWidthCLI(prefix))+line)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf("\033[1;33m┌%s┐\033[0m\n", border)
+	row("\033[1;33m", "  ⚠  即将执行高风险操作")
+	printWrapped("  操作: ", title)
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		printWrapped("  说明: ", line)
+	}
+	fmt.Printf("\033[1;33m├%s┤\033[0m\n", border)
+	row("\033[1;32m", "  ✓ 确认: 直接按 Enter 或输入 y")
+	row("\033[1;31m", "  ✗ 取消: 输入 n")
+	fmt.Printf("\033[1;33m└%s┘\033[0m\n", border)
+	fmt.Printf("\033[1;33m▶ \033[0m")
+}
+
+func visibleWidthCLI(s string) int {
+	w := 0
+	for _, r := range s {
+		if r > 0x7F {
+			w += 2
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+func splitToWidthCLI(s string, maxW int) []string {
+	if visibleWidthCLI(s) <= maxW {
+		return []string{s}
+	}
+	var lines []string
+	runes := []rune(s)
+	cur := 0
+	start := 0
+	for i, r := range runes {
+		cw := 1
+		if r > 0x7F {
+			cw = 2
+		}
+		if cur+cw > maxW {
+			lines = append(lines, string(runes[start:i]))
+			start = i
+			cur = cw
+		} else {
+			cur += cw
+		}
+	}
+	if start < len(runes) {
+		lines = append(lines, string(runes[start:]))
+	}
+	return lines
 }
 
 // printBanner 打印欢迎横幅
@@ -222,6 +457,7 @@ func (c *CLI) printHelp() {
 	fmt.Println("    exit           - 退出管理面板")
 	fmt.Println()
 	fmt.Println("\033[1;36m提示:\033[0m 大部分命令支持简写，例如 'h' = 'help', 'q' = 'exit'")
+	fmt.Println("\033[1;36m交互:\033[0m 支持 Tab 补全，部分列表支持 ↑/↓ 或 j/k 选择")
 	fmt.Println()
 }
 
@@ -551,6 +787,9 @@ func (c *CLI) getProxyStatus() {
 // switchEnvironment 切换环境
 func (c *CLI) switchEnvironment(env string) {
 	c.printInfo(fmt.Sprintf("切换到 %s 环境...", env))
+	if !c.confirmDangerAction(fmt.Sprintf("切换所有服务到 %s 环境", env), []string{"该操作会修改代理配置中的活跃环境。", "如代理正在运行，后续通常需要重启代理生效。"}) {
+		return
+	}
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
@@ -575,18 +814,10 @@ func (c *CLI) switchEnvironment(env string) {
 
 // confirmAndExecute 确认后执行
 func (c *CLI) confirmAndExecute(action string, fn func()) {
-	prompt := fmt.Sprintf("\033[1;33m确认要执行: %s? (y/n): \033[0m", action)
-	confirm, err := c.readLineWithPrompt(prompt)
-	if err != nil {
+	if !c.confirmDangerAction(action, nil) {
 		return
 	}
-
-	confirm = strings.ToLower(confirm)
-	if confirm == "y" || confirm == "yes" {
-		fn()
-	} else {
-		c.printInfo("已取消")
-	}
+	fn()
 }
 
 // clearScreen 清屏
@@ -894,6 +1125,7 @@ func (c *CLI) loadProxyConfig() (*config.Config, error) {
 					break
 				}
 			}
+			c.setMainPrompt()
 		}
 	}
 	return cfg, nil
@@ -903,12 +1135,7 @@ func (c *CLI) promptProxyRestart() {
 	if !c.isProxyRunning() {
 		return
 	}
-	confirm, err := c.readLineWithPrompt("\033[1;33m配置已更新，代理需要重启生效，是否立即重启? (y/n): \033[0m")
-	if err != nil {
-		return
-	}
-	confirm = strings.ToLower(strings.TrimSpace(confirm))
-	if confirm == "y" || confirm == "yes" {
+	if c.confirmDangerAction("立即重启代理", []string{"配置已更新，代理需要重启后才会生效。"}) {
 		c.restartProxyService()
 	}
 }
@@ -1060,27 +1287,30 @@ func (c *CLI) handleExistingConfig(configPath string) {
 	fmt.Println("  3. 查看完整配置")
 	fmt.Println("  4. 取消")
 
-	choice, err := c.readLineWithPrompt("\n\033[1;33m请选择 (1-4): \033[0m")
-	if err != nil {
+	choice, ok := c.selectSimpleMenu("初始化向导", []string{
+		"重新初始化（覆盖现有配置）",
+		"编辑配置文件",
+		"查看完整配置",
+		"取消",
+	}, 1)
+	if !ok || choice == 3 {
+		c.printInfo("已取消")
 		return
 	}
 
 	switch choice {
-	case "1":
+	case 0:
+		if !c.confirmDangerAction("重新初始化系统", []string{"该操作会按初始化脚本重新写入环境和配置。", "请确认现有配置已备份或允许被覆盖。"}) {
+			return
+		}
 		c.printInfo("重新初始化系统...")
 		c.executeScript("init.sh")
 
-	case "2":
+	case 1:
 		c.EditConfig()
 
-	case "3":
+	case 2:
 		c.ShowConfig()
-
-	case "4":
-		c.printInfo("已取消")
-
-	default:
-		c.printError("无效选择")
 	}
 }
 
@@ -1105,20 +1335,23 @@ func (c *CLI) handleCert(args []string) {
 	var domain string
 
 	if configDomain != "" {
-		// 配置文件中有域名，询问是否使用
 		c.printInfo(fmt.Sprintf("检测到配置文件中的域名: %s", configDomain))
-
-		choice, err := c.readLineWithPrompt("\033[1;33m是否为此域名申请证书? (y/n): \033[0m")
-		if err != nil {
+		choice, ok := c.selectSimpleMenu(
+			"证书申请方式",
+			[]string{
+				fmt.Sprintf("使用配置文件域名: %s", configDomain),
+				"手动输入其他域名",
+				"取消",
+			},
+			0,
+		)
+		if !ok || choice == 2 {
+			c.printInfo("已取消")
 			return
 		}
-
-		choice = strings.ToLower(choice)
-
-		if choice == "y" || choice == "yes" {
+		if choice == 0 {
 			domain = configDomain
 		} else {
-			// 用户选择不使用配置文件中的域名，手动输入
 			input, err := c.readLineWithPrompt("\033[1;33m请输入要申请证书的域名: \033[0m")
 			if err != nil {
 				return
@@ -1131,10 +1364,9 @@ func (c *CLI) handleCert(args []string) {
 			}
 		}
 	} else if len(args) > 0 {
-		// 命令行直接指定了域名
 		domain = strings.Join(args, " ")
 	} else {
-		// 没有配置文件域名也没有命令行参数，需要手动输入
+		c.printInfo("未检测到配置文件域名，请手动输入")
 		input, err := c.readLineWithPrompt("\033[1;33m请输入要申请证书的域名 (例如: example.com): \033[0m")
 		if err != nil {
 			return
@@ -1145,6 +1377,14 @@ func (c *CLI) handleCert(args []string) {
 			c.printError("域名不能为空")
 			return
 		}
+	}
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		c.printError("域名不能为空")
+		return
+	}
+	if !c.confirmDangerAction(fmt.Sprintf("申请证书: %s", domain), []string{"将调用证书申请脚本并尝试签发/续签证书。"}) {
+		return
 	}
 
 	// 申请证书
@@ -1237,6 +1477,7 @@ func (c *CLI) addService() {
 	confirm, err := c.readLineWithPrompt("[1;33m是否切换到新服务? (y/n): [0m")
 	if err == nil && (confirm == "y" || confirm == "Y" || confirm == "yes") {
 		c.currentService = serviceID
+		c.setMainPrompt()
 		c.printSuccess(fmt.Sprintf("已切换到服务[%s]", serviceID))
 		c.printInfo("现在可以使用 start/stop/deploy 命令操作此服务")
 	}
@@ -1312,38 +1553,27 @@ func (c *CLI) listServices() {
 func (c *CLI) removeService() {
 	fmt.Println("\n\033[1;34m=== Remove Service ===\033[0m\n")
 
-	// ???????
-	c.listServices()
-
-	serviceID, err := c.readLineWithPrompt("[1;33m输入要删除的服务ID: [0m")
-	if err != nil || serviceID == "" {
-		c.printError("服务ID不能为空")
-		return
-	}
-
-	confirm, err := c.readLineWithPrompt(fmt.Sprintf("[1;31m确认删除服务[%s]? (yes/no): [0m", serviceID))
-	if err != nil {
-		c.printInfo("已取消")
-		return
-	}
-
-	confirm = strings.ToLower(strings.TrimSpace(confirm))
-	if confirm != "y" && confirm != "yes" {
-		c.printInfo("已取消")
-		return
-	}
-
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
 		c.printError(fmt.Sprintf("读取配置失败: %v", err))
 		return
 	}
-	if _, exists := cfg.Services[serviceID]; !exists {
-		c.printError(fmt.Sprintf("服务[%s]不存在", serviceID))
-		return
-	}
 	if len(cfg.Services) <= 1 {
 		c.printError("至少需要保留一个服务")
+		return
+	}
+
+	ids := make([]string, 0, len(cfg.Services))
+	for id := range cfg.Services {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	serviceID, ok := c.selectRemovableServiceMenu(cfg, ids)
+	if !ok {
+		c.printInfo("已取消")
+		return
+	}
+	if !c.confirmDangerAction(fmt.Sprintf("删除服务[%s]", serviceID), []string{"该操作会从代理配置中移除该服务。", "删除后如代理正在运行，建议按提示重启代理。"}) {
 		return
 	}
 
@@ -1364,10 +1594,34 @@ func (c *CLI) removeService() {
 				break
 			}
 		}
+		c.setMainPrompt()
 		c.printInfo("已自动切换当前服务")
 	}
 
 	c.promptProxyRestart()
+}
+
+func (c *CLI) selectRemovableServiceMenu(cfg *config.Config, ids []string) (string, bool) {
+	options := make([]string, 0, len(ids))
+	selected := 0
+	for i, id := range ids {
+		svc := cfg.Services[id]
+		name := svc.Name
+		if name == "" {
+			name = id
+		}
+		line := fmt.Sprintf("%-12s  %s", id, name)
+		if id == c.currentService {
+			line += " [当前]"
+			selected = i
+		}
+		options = append(options, line)
+	}
+	idx, ok := c.selectSimpleMenu("选择要删除的服务", options, selected)
+	if !ok {
+		return "", false
+	}
+	return ids[idx], true
 }
 
 // switchService 切换当前服务
@@ -1389,10 +1643,144 @@ func (c *CLI) switchService() {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	selectedID, ok := c.selectServiceMenu(cfg, ids)
+	if !ok {
+		c.printInfo("已取消")
+		return
+	}
 
-	fmt.Println("[1;33m可用服务:[0m")
+	c.currentService = selectedID
+	c.setMainPrompt()
+	c.printSuccess(fmt.Sprintf("已切换到服务[%s]", selectedID))
+	c.printInfo("现在可以使用 start/stop/deploy 命令操作此服务")
+}
+
+func (c *CLI) selectServiceMenu(cfg *config.Config, ids []string) (string, bool) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return c.selectServiceFallback(cfg, ids)
+	}
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return c.selectServiceFallback(cfg, ids)
+	}
+	defer term.Restore(fd, oldState)
+
+	hideCursor := func() { fmt.Print("\033[?25l") }
+	showCursor := func() { fmt.Print("\033[?25h") }
+	hideCursor()
+	defer showCursor()
+
+	_, height, err := term.GetSize(fd)
+	if err != nil || height < 8 {
+		height = 12
+	}
+	maxVisible := height - 4
+	if maxVisible < 5 {
+		maxVisible = 5
+	}
+
+	selected := 0
+	for i, id := range ids {
+		if id == c.currentService {
+			selected = i
+			break
+		}
+	}
+	start := 0
+	renderedLines := 0
+	reader := bufio.NewReader(os.Stdin)
+
+	render := func() {
+		if renderedLines > 0 {
+			fmt.Printf("\033[%dA", renderedLines)
+			fmt.Print("\r\033[0J")
+		}
+		fmt.Print("\r\033[1;33m选择服务（↑/↓ 或 j/k 选择，Enter 确认，Esc 取消）:\033[0m\r\n")
+		renderedLines = 1
+		if selected < start {
+			start = selected
+		} else if selected >= start+maxVisible {
+			start = selected - maxVisible + 1
+		}
+		end := start + maxVisible
+		if end > len(ids) {
+			end = len(ids)
+		}
+		for i := start; i < end; i++ {
+			id := ids[i]
+			svc := cfg.Services[id]
+			name := svc.Name
+			if name == "" {
+				name = id
+			}
+			line := fmt.Sprintf("%-12s  %s", id, name)
+			if id == c.currentService {
+				line += " [当前]"
+			}
+			prefix := "  "
+			if i == selected {
+				prefix = "\033[1;32m> \033[0m"
+				line = "\033[1;32m" + line + "\033[0m"
+			}
+			fmt.Printf("\r%s%s\r\n", prefix, line)
+			renderedLines++
+		}
+	}
+
+	readKey := func() rune {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0
+		}
+		if b == 0x1b {
+			next, _ := reader.ReadByte()
+			if next == '[' {
+				third, _ := reader.ReadByte()
+				switch third {
+				case 'A':
+					return 'U'
+				case 'B':
+					return 'D'
+				}
+			}
+			return 0x1b
+		}
+		return rune(b)
+	}
+
+	render()
+	for {
+		switch readKey() {
+		case 'U', 'k', 'K':
+			if selected > 0 {
+				selected--
+				render()
+			}
+		case 'D', 'j', 'J':
+			if selected < len(ids)-1 {
+				selected++
+				render()
+			}
+		case '\r', '\n':
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			return ids[selected], true
+		case 0x1b, 3:
+			if renderedLines > 0 {
+				fmt.Printf("\033[%dA", renderedLines)
+				fmt.Print("\r\033[0J")
+			}
+			return "", false
+		}
+	}
+}
+
+func (c *CLI) selectServiceFallback(cfg *config.Config, ids []string) (string, bool) {
+	fmt.Println("\033[1;33m可用服务:\033[0m")
 	fmt.Println(strings.Repeat("╰", 60))
-
 	for i, id := range ids {
 		svc := cfg.Services[id]
 		name := svc.Name
@@ -1401,41 +1789,27 @@ func (c *CLI) switchService() {
 		}
 		mark := ""
 		if id == c.currentService {
-			mark = " [1;32m→当前[0m"
+			mark = " \033[1;32m→当前\033[0m"
 		}
 		fmt.Printf("  %d. %-12s  %s%s\n", i+1, id, name, mark)
-
 	}
 	fmt.Println(strings.Repeat("╰", 60))
-
-	choice, err := c.readLineWithPrompt("[1;33m选择服务 (输入编号或ID): [0m")
+	choice, err := c.readLineWithPrompt("\033[1;33m选择服务 (输入编号或ID): \033[0m")
 	if err != nil || choice == "" {
-		c.printInfo("已取消")
-		return
+		return "", false
 	}
-
-	var selectedID string
 	var index int
 	if n, err := fmt.Sscanf(choice, "%d", &index); err == nil && n == 1 && index > 0 && index <= len(ids) {
-		selectedID = ids[index-1]
-	} else {
-		selectedID = strings.TrimSpace(choice)
-		found := false
-		for _, id := range ids {
-			if id == selectedID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			c.printError(fmt.Sprintf("服务[%s]不存在", selectedID))
-			return
+		return ids[index-1], true
+	}
+	selectedID := strings.TrimSpace(choice)
+	for _, id := range ids {
+		if id == selectedID {
+			return selectedID, true
 		}
 	}
-
-	c.currentService = selectedID
-	c.printSuccess(fmt.Sprintf("已切换到服务[%s]", selectedID))
-	c.printInfo("现在可以使用 start/stop/deploy 命令操作此服务")
+	c.printError(fmt.Sprintf("服务[%s]不存在", selectedID))
+	return "", false
 }
 
 // executeServiceCommand 执行当前服务的命令

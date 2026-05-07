@@ -2,19 +2,19 @@ package agent
 
 // Message 对话消息（内部统一格式，各 provider 负责转换）
 type Message struct {
-	Role             string
-	Content          string
-	ReasoningContent string     // assistant 思考模式返回的推理内容，需原样传回 API
-	ToolCalls        []ToolCall // role=assistant 且 AI 要调工具时非空
-	ToolCallID       string     // role=tool 时填，对应 ToolCall.ID
-	Name             string     // role=tool 时填工具名
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"` // assistant 思考模式返回的推理内容，需原样传回 API
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`        // role=assistant 且 AI 要调工具时非空
+	ToolCallID       string     `json:"tool_call_id,omitempty"`      // role=tool 时填，对应 ToolCall.ID
+	Name             string     `json:"name,omitempty"`              // role=tool 时填工具名
 }
 
 // ToolCall AI 请求调用的单个工具
 type ToolCall struct {
-	ID        string // provider 返回的唯一 ID
-	Name      string
-	Arguments string // JSON 字符串
+	ID        string `json:"id"`        // provider 返回的唯一 ID
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串
 }
 
 // ChatResponse 非流式响应

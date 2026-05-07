@@ -50,6 +50,19 @@ func (c *ContextManager) Clear() {
 	c.messages = system
 }
 
+// ReplaceSystem 替换或添加 system 消息（用于恢复历史时更新上下文）
+func (c *ContextManager) ReplaceSystem(content string) {
+	systemMsg := Message{Role: "system", Content: content}
+	for i, m := range c.messages {
+		if m.Role == "system" {
+			c.messages[i] = systemMsg
+			return
+		}
+	}
+	// 没有 system 消息则插入到最前面
+	c.messages = append([]Message{systemMsg}, c.messages...)
+}
+
 // Len 返回消息数量
 func (c *ContextManager) Len() int { return len(c.messages) }
 
