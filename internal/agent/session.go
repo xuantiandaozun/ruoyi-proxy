@@ -32,9 +32,25 @@ type SessionStore struct {
 	indexPath string
 }
 
-type slashCommandItem struct {
+// SlashCommandItem 斜杠命令菜单项
+type SlashCommandItem struct {
 	Command     string
 	Description string
+}
+
+func filterSlashCommands(items []SlashCommandItem, prefix string) []SlashCommandItem {
+	prefix = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(prefix), "/"))
+	if prefix == "" {
+		return items
+	}
+	filtered := make([]SlashCommandItem, 0, len(items))
+	for _, item := range items {
+		cmd := strings.TrimPrefix(strings.ToLower(item.Command), "/")
+		if strings.HasPrefix(cmd, prefix) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 // NewSessionStore 创建会话存储。
@@ -364,7 +380,7 @@ func sessionMenuLine(item SessionMeta, current bool) string {
 		trimRunes(item.Title, 18), timeText, item.UserTurns, item.ID, mark)
 }
 
-func selectSlashCommandInteractive(items []slashCommandItem, readInput func(string) (string, error)) (string, bool, error) {
+func selectSlashCommandInteractive(items []SlashCommandItem, readInput func(string) (string, error)) (string, bool, error) {
 	if len(items) == 0 {
 		return "", false, nil
 	}
@@ -402,7 +418,7 @@ func selectSlashCommandInteractive(items []slashCommandItem, readInput func(stri
 			fmt.Printf("\033[%dA", renderedLines)
 			fmt.Print("\r\033[0J")
 		}
-		fmt.Print("\r\033[1;33mAgent 命令（↑/↓ 或 j/k 选择，Enter 执行，Esc 取消）:\033[0m\r\n")
+		fmt.Print("\r\033[1;33m命令菜单（↑/↓ 或 j/k 选择，Enter 执行，Esc 取消）:\033[0m\r\n")
 		renderedLines = 1
 		if selected < start {
 			start = selected
@@ -475,7 +491,7 @@ func selectSlashCommandInteractive(items []slashCommandItem, readInput func(stri
 	}
 }
 
-func selectSlashCommandFallback(items []slashCommandItem, readInput func(string) (string, error)) (string, bool, error) {
+func selectSlashCommandFallback(items []SlashCommandItem, readInput func(string) (string, error)) (string, bool, error) {
 	var sb strings.Builder
 	sb.WriteString("Agent 命令:\n")
 	for i, item := range items {

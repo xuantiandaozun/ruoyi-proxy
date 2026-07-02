@@ -1,4 +1,7 @@
-.PHONY: build linux run clean install cli sync
+.PHONY: build linux run clean install cli sync linux-hub linux-spoke build-hub build-spoke
+
+LDFLAGS = -s -w
+BUILD_PKG = ruoyi-proxy/internal/buildinfo
 
 # 同步脚本和配置到 cmd/proxy/（编译前必须执行）
 sync:
@@ -9,21 +12,30 @@ sync:
 
 # 编译程序（自动同步）
 build: sync
-	go build -o bin/ruoyi-proxy cmd/proxy/main.go
+	go build -ldflags "$(LDFLAGS)" -o bin/ruoyi-proxy cmd/proxy/main.go
 
 # 编译 Linux 版本（脚本已内嵌，自动同步）
 linux: sync
-	GOOS=linux GOARCH=amd64 go build -o bin/ruoyi-proxy-linux cmd/proxy/main.go
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/ruoyi-proxy-linux cmd/proxy/main.go
 	@echo ""
 	@echo "✓ 编译完成: bin/ruoyi-proxy-linux"
-	@echo "提示: 脚本和配置已内嵌，只需上传这一个文件"
+
+# Hub 节点：嵌入完整 AI 密钥 + 启用 Hub 网关
+linux-hub: sync
+	go run ./cmd/prepare-embed -profile=hub
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS) -X $(BUILD_PKG).Profile=hub" -o bin/ruoyi-proxy-linux-hub cmd/proxy/main.go
 	@echo ""
-	@echo "部署命令:"
-	@echo "  scp bin/ruoyi-proxy-linux user@server:/opt/ruoyi-proxy/"
-	@echo "  ssh user@server"
-	@echo "  cd /opt/ruoyi-proxy"
-	@echo "  chmod +x ruoyi-proxy-linux"
-	@echo "  ./ruoyi-proxy-linux cli"
+	@echo "✓ Hub 包: bin/ruoyi-proxy-linux-hub（已嵌入 AI 配置，hub.enabled=true）"
+
+# Spoke 节点：嵌入 Hub 地址，不含 AI 密钥
+linux-spoke: sync
+	go run ./cmd/prepare-embed -profile=spoke -hub-url="$(HUB_URL)"
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS) -X $(BUILD_PKG).Profile=spoke" -o bin/ruoyi-proxy-linux-spoke cmd/proxy/main.go
+	@echo ""
+	@echo "✓ Spoke 包: bin/ruoyi-proxy-linux-spoke（已嵌入 Hub 地址，首次运行 /agent-config 注册 Token）"
+
+build-hub: linux-hub
+build-spoke: linux-spoke
 
 # 运行程序
 run:

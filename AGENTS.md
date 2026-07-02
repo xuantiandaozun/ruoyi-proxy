@@ -13,19 +13,19 @@ HTTPS auto-configuration, multi-service management, and an AI agent mode (ReAct 
 
 ```bash
 make build          # Auto-syncs scripts/configs, then builds for current platform → bin/ruoyi-proxy
-make linux          # Cross-compile for Linux (GOOS=linux GOARCH=amd64) → bin/ruoyi-proxy-linux
+make linux          # Cross-compile for Linux → bin/ruoyi-proxy-linux
+make linux-hub      # Hub 节点：嵌入完整 AI 配置 + hub.enabled=true → bin/ruoyi-proxy-linux-hub
+make linux-spoke HUB_URL=https://your-hub.example.com  # Spoke：嵌入 Hub 地址，不含密钥 → bin/ruoyi-proxy-linux-spoke
 make run            # Dev mode: go run cmd/proxy/main.go (proxy server, no CLI)
 make cli            # Dev CLI:  go run cmd/proxy/main.go cli
-make install        # go mod tidy && go mod download
-make clean          # rm -rf bin/ + runtime config files
-make fmt            # go fmt ./...
-make test           # go test -v ./...
 ```
 
-**Windows**: `build.bat` (no args = Windows build, `build.bat linux` = Linux cross-compile).
-It runs xcopy to sync scripts/configs before building, equivalent to `make sync && make build`.
+**打包前**：在本地 `configs/app_config.json` 写好 AI 配置（可参考 `configs/app_config.example.json`）。
 
-`make build` / `make linux` already call `make sync` first — no separate sync needed.
+- **Hub 包** (`make linux-hub`)：将 `ai` 段（含 api_key）和 `hub.enabled=true` 打入二进制，部署后可直接对话
+- **Spoke 包** (`make linux-spoke HUB_URL=...`)：只嵌入 Hub 地址（`ai.provider=hub`, `ai.base_url`），不含 api_key；服务器上只需 `/agent-config` 填一次性注册 Token
+
+**Windows**: `build.bat linux-hub` / `build.bat linux-spoke`（Spoke 需先 `set HUB_URL=https://...`）
 
 ## Testing
 
@@ -112,11 +112,23 @@ configs/sync_config.json     # File sync settings
 
 ## CLI Architecture
 
+- **`make cli` / `ruoyi-proxy cli` 默认直接进入 AI Agent 对话模式**（不再是菜单式 REPL）
+- 运维命令以 **`/xxx` 斜杠命令** 在 Agent 提示符下调用（如 `/start`、`/deploy`、`/status`）；也可用自然语言描述需求
+- `/help` 或 `/commands` 查看命令列表；`/agent-config` 配置 AI；`/exit` 退出
 - Uses `github.com/chzyer/readline` for tab completion and prompt management
-- Service commands (start/stop/deploy/logs) call `service.sh` via `bash` with env vars:
+- Service commands call per-service control script via `bash` with env vars:
   `SERVICE_ID`, `APP_NAME`, `APP_JAR_PATTERN`, `BLUE_PORT`, `GREEN_PORT`, `APP_HOME`
+- Default script is `scripts/service.sh`; non-Java projects can register custom script via `ServiceConfig.script_path` (AI tool `configure_service`)
 - `APP_HOME` is derived from `scripts/service.sh` location (two levels up)
 - Proxy process management: start via `exec.Command`, stop via PID kill or port-lookup
+
+## Hub AI Gateway (多服务器)
+
+- Hub 模式：`configs/app_config.json` 中 `"hub": {"enabled": true}` 启用
+- Hub 在代理端口暴露 `/__hub__/v1/register` 和 `/__hub__/v1/chat`；管理端口暴露 `/hub/token`、`/hub/status`、`/hub/revoke`
+- Spoke 在 `/agent-config` 选择 `hub` 提供商，用 Hub 上 `/hub-token` 生成的一次性 Token 注册，之后 AI 调用经 Hub 转发（本地仍执行工具）
+- Spoke 注册表持久化在 `configs/hub_spokes.json`（gitignored 运行时文件）
+- v1 转发为非流式（整段返回）；Hub 进程重启会清空未使用的一次性注册 Token
 
 ## Important Notes
 

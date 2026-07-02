@@ -19,7 +19,7 @@ type Provider interface {
 func NewProvider(cfg AIConfig) (Provider, error) {
 	timeout := cfg.TimeoutSeconds
 	if timeout <= 0 {
-		timeout = 60
+		timeout = 120
 	}
 	maxTokens := cfg.MaxTokens
 	if maxTokens <= 0 {
@@ -49,7 +49,15 @@ func NewProvider(cfg AIConfig) (Provider, error) {
 			timeout:   timeout,
 		}, nil
 
+	case "hub":
+		return &hubProvider{
+			hubURL:  cfg.EffectiveBaseURL(),
+			token:   cfg.APIKey,
+			model:   cfg.Model,
+			timeout: timeout,
+		}, nil
+
 	default:
-		return nil, fmt.Errorf("不支持的 provider: %s（支持 openai / anthropic / ollama）", cfg.Provider)
+		return nil, fmt.Errorf("不支持的 provider: %s（支持 openai / anthropic / ollama / hub）", cfg.Provider)
 	}
 }

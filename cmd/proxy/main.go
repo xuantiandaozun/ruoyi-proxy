@@ -8,8 +8,10 @@ import (
 	"os"
 	"time"
 
+	"ruoyi-proxy/internal/buildinfo"
 	"ruoyi-proxy/internal/cli"
 	"ruoyi-proxy/internal/config"
+	"ruoyi-proxy/internal/hub"
 	"ruoyi-proxy/internal/proxy"
 )
 
@@ -20,18 +22,40 @@ var scriptsFS embed.FS
 var configsFS embed.FS
 
 func main() {
-	// 检查是否是CLI模式
-	if len(os.Args) > 1 && os.Args[1] == "cli" {
-		// 注入嵌入的文件系统
-		cli.SetEmbedFS(scriptsFS, configsFS)
-
-		// 启动交互式CLI
-		c := cli.New()
-		c.Start()
-		return
+	mode := ""
+	if len(os.Args) > 1 {
+		mode = os.Args[1]
 	}
 
+	// Spoke 包默认进入 Agent/CLI；代理必须通过 /proxy-start 显式启动。
+	if mode == "cli" || (mode == "" && buildinfo.IsSpoke()) {
+		runCLI()
+		return
+	}
+	runProxy()
+}
+
+func runCLI() {
+	// 注入嵌入的文件系统
+	cli.SetEmbedFS(scriptsFS, configsFS)
+
+	// 启动交互式CLI
+	c := cli.New()
+	c.Start()
+}
+
+func runProxy() {
 	log.Println("蓝绿代理程序启动中...")
+
+	hubSettings, _ := hub.LoadHubSettings()
+	hubActive := hubSettings.Enabled || buildinfo.IsHub()
+	if hubActive {
+		if err := hub.LoadSpokes(); err != nil {
+			log.Printf("加载 Hub spoke 注册表失败: %v", err)
+		} else if hubSettings.Enabled || buildinfo.IsHub() {
+			log.Println("Hub AI 网关已启用")
+		}
+	}
 
 	// 初始化代理
 	p, err := proxy.New()
@@ -40,16 +64,22 @@ func main() {
 	}
 
 	// 启动管理服务器（在后台goroutine中）
-	go startMgmtServer(p)
+	go startMgmtServer(p, hubActive)
 
 	// 启动代理服务器
-	startProxyServer(p)
+	startProxyServer(p, hubActive)
 }
 
 // startProxyServer 启动代理服务器
-func startProxyServer(p *proxy.Proxy) {
+func startProxyServer(p *proxy.Proxy, hubEnabled bool) {
 	proxyMux := http.NewServeMux()
 	proxyMux.HandleFunc("/", p.HandleProxy)
+	if hubEnabled {
+		proxyMux.HandleFunc("/__hub__/v1/token", hub.RegisterTokenHandler)
+		proxyMux.HandleFunc("/__hub__/v1/register", hub.RegisterHandler)
+		proxyMux.HandleFunc("/__hub__/v1/profile", hub.ProfileHandler)
+		proxyMux.HandleFunc("/__hub__/v1/chat", hub.ChatHandler)
+	}
 
 	proxyServer := &http.Server{
 		Addr:    config.ProxyPort,
@@ -70,7 +100,7 @@ func startProxyServer(p *proxy.Proxy) {
 }
 
 // startMgmtServer 启动管理服务器
-func startMgmtServer(p *proxy.Proxy) {
+func startMgmtServer(p *proxy.Proxy, hubEnabled bool) {
 	mgmtMux := http.NewServeMux()
 	mgmtMux.HandleFunc("/switch", func(w http.ResponseWriter, r *http.Request) {
 		handleSwitch(p, w, r)
@@ -78,6 +108,12 @@ func startMgmtServer(p *proxy.Proxy) {
 	mgmtMux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		handleStatus(p, w, r)
 	})
+	if hubEnabled {
+		mgmtMux.HandleFunc("/hub/token", hub.TokenAdminHandler)
+		mgmtMux.HandleFunc("/hub/status", hub.StatusAdminHandler)
+		mgmtMux.HandleFunc("/hub/spoke", hub.SpokeAdminHandler)
+		mgmtMux.HandleFunc("/hub/revoke", hub.RevokeAdminHandler)
+	}
 
 	mgmtServer := &http.Server{
 		Addr:    config.MgmtPort,

@@ -10,12 +10,14 @@ import (
 
 // ServiceConfig 单个服务配置
 type ServiceConfig struct {
-	Name        string `json:"name"`         // 服务名称（显示用）
-	BlueTarget  string `json:"blue_target"`  // 蓝色环境地址
-	GreenTarget string `json:"green_target"` // 绿色环境地址
-	ActiveEnv   string `json:"active_env"`   // 当前活跃环境 blue/green
-	JarFile     string `json:"jar_file"`     // JAR文件名（用于启动服务）
-	AppName     string `json:"app_name"`     // 应用名称（用于区分PID文件等）
+	Name        string `json:"name"`                   // 服务名称（显示用）
+	BlueTarget  string `json:"blue_target"`            // 蓝色环境地址
+	GreenTarget string `json:"green_target"`           // 绿色环境地址
+	ActiveEnv   string `json:"active_env"`             // 当前活跃环境 blue/green
+	JarFile     string `json:"jar_file"`               // JAR文件名（用于启动服务）
+	AppName     string `json:"app_name"`               // 应用名称（用于区分PID文件等）
+	ScriptPath  string `json:"script_path,omitempty"`  // 自定义控制脚本路径，留空则用 scripts/service.sh
+	ProjectType string `json:"project_type,omitempty"` // 项目类型标注（java/node/python/docker 等）
 }
 
 // Config 代理配置结构（支持多服务）

@@ -2,9 +2,13 @@ package cli
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"ruoyi-proxy/internal/buildinfo"
 )
 
 var scriptsFS embed.FS
@@ -123,6 +127,9 @@ func (c *CLI) ensureConfigs() error {
 		if !exists {
 			c.printSuccess(fmt.Sprintf("创建配置: %s", config))
 			created = true
+			if config == "app_config.json" {
+				c.printEmbeddedConfigHint(data)
+			}
 		}
 	}
 
@@ -131,4 +138,29 @@ func (c *CLI) ensureConfigs() error {
 	}
 
 	return nil
+}
+
+func (c *CLI) printEmbeddedConfigHint(data []byte) {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return
+	}
+	switch buildinfo.Profile {
+	case "hub":
+		c.printInfo("Hub 包已预置 AI 与网关；请先无参数启动: ./ruoyi-proxy-linux-hub，再 cli 管理")
+	case "spoke":
+		var ai struct {
+			Provider string `json:"provider"`
+			BaseURL  string `json:"base_url"`
+			APIKey   string `json:"api_key"`
+		}
+		if raw, ok := root["ai"]; ok {
+			_ = json.Unmarshal(raw, &ai)
+		}
+		if ai.Provider == "hub" && ai.BaseURL != "" {
+			if strings.TrimSpace(ai.APIKey) == "" {
+				c.printInfo(fmt.Sprintf("Spoke 包已预置 Hub 地址: %s，运行 /agent-config 填入注册 Token 即可", ai.BaseURL))
+			}
+		}
+	}
 }

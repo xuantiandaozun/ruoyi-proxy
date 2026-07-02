@@ -413,7 +413,7 @@ start_env() {
     
     # 等待应用启动 - 增加等待时间
     echo -e "${CYAN}等待应用启动...${NC}"
-    local startup_wait=20  # 增加到20秒
+    local startup_wait=60  # 增加到60秒（适配1核CPU慢启动）
     for i in $(seq 1 $startup_wait); do
         # 检查进程是否还在运行
         if ! kill -0 $java_pid 2>/dev/null; then
@@ -770,30 +770,56 @@ restart() {
     fi
 }
 
-# 简单健康检查 - 只检查端口和进程稳定性
+
+
+# 改进的健康检查 - 区分"进程真死"和"端口未就绪"，增加等待重试
 health_check() {
     local env="$1"
     local port=$(get_env_port "$env")
     local check_duration=${2:-5}  # 检查持续时间，默认5秒
+    local max_wait=${3:-30}       # 最大等待端口就绪时间，默认30秒
     
-    echo -e "${YELLOW}健康检查 $env 环境 (端口: $port)，检查 $check_duration 秒...${NC}"
+    echo -e "${YELLOW}健康检查 $env 环境 (端口: $port)${NC}"
     
-    # 先检查进程是否存在
-    if [ "$(check_env_status "$env")" != "running" ]; then
-        echo -e "${RED}$env 环境进程未运行${NC}"
+    # === 第1步：等待进程启动（处理进程启动慢的情况）===
+    echo -e "${CYAN}等待进程启动...${NC}"
+    local status=$(check_env_status "$env")
+    local waited=0
+    while [ "$status" = "stopped" ] && [ $waited -lt $max_wait ]; do
+        sleep 3
+        waited=$((waited + 3))
+        status=$(check_env_status "$env")
+    done
+    
+    if [ "$status" = "stopped" ]; then
+        echo -e "${RED}$env 环境进程始终未启动（等待 ${waited}秒）${NC}"
         return 1
     fi
     
-    # 等待应用启动
-    echo -e "${CYAN}等待应用启动...${NC}"
-    sleep 3
+    # === 第2步：如果进程活着但端口未就绪(unhealthy)，等待端口就绪 ===
+    if [ "$status" = "unhealthy" ]; then
+        echo -e "${YELLOW}进程已启动（PID: $(cat $(get_env_pid_file "$env") 2>/dev/null)），等待端口 $port 就绪...${NC}"
+        waited=0
+        while [ "$status" = "unhealthy" ] && [ $waited -lt $max_wait ]; do
+            sleep 3
+            waited=$((waited + 3))
+            status=$(check_env_status "$env")
+            echo -e "${CYAN}  等待中...（${waited}秒/${max_wait}秒）${NC}"
+        done
+        
+        if [ "$status" = "unhealthy" ]; then
+            echo -e "${RED}等待超时，端口 $port 始终未就绪（等待 ${waited}秒）${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}端口 $port 已就绪（等待 ${waited}秒）${NC}"
+    fi
     
-    # 检查端口是否可连接
+    # === 第3步：检查端口可连接性 ===
     if ! command -v nc >/dev/null 2>&1; then
         echo -e "${YELLOW}未找到nc命令，跳过端口检查${NC}"
         sleep $check_duration
         if [ "$(check_env_status "$env")" = "running" ]; then
-            echo -e "${GREEN}进程稳定运行${NC}"
+            echo -e "${GREEN}健康检查通过：进程稳定运行${NC}"
             return 0
         else
             echo -e "${RED}进程意外退出${NC}"
@@ -801,7 +827,6 @@ health_check() {
         fi
     fi
     
-    # 检查端口是否可连接
     if ! nc -z localhost $port 2>/dev/null; then
         echo -e "${RED}端口 $port 不可连接${NC}"
         return 1
@@ -809,10 +834,10 @@ health_check() {
     
     echo -e "${GREEN}端口 $port 可连接${NC}"
     
-    # 持续检查指定时间，确保进程稳定
+    # === 第4步：持续检查稳定性 ===
     echo -e "${CYAN}检查进程稳定性 $check_duration 秒...${NC}"
     for i in $(seq 1 $check_duration); do
-        if [ "$(check_env_status "$env")" != "running" ]; then
+        if [ "$(check_env_status "$env")" = "stopped" ]; then
             echo -e "${RED}第 $i 秒时进程意外退出${NC}"
             return 1
         fi
@@ -828,7 +853,6 @@ health_check() {
     echo -e "${GREEN}健康检查通过：进程稳定运行 $check_duration 秒${NC}"
     return 0
 }
-
 # 等待端口释放
 wait_port_release() {
     local port="$1"

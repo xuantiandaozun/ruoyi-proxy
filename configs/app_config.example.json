@@ -1,0 +1,42 @@
+{
+  "domain": "example.com",
+  "enable_https": false,
+  "hub": {
+    "enabled": false
+  },
+  "ai": {
+    "provider": "openai",
+    "api_key": "sk-your-key-here",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "max_tokens": 4096,
+    "context_limit": 24000,
+    "timeout_seconds": 120
+  },
+  "proxy": {
+    "blue_target": "http://127.0.0.1:8080",
+    "green_target": "http://127.0.0.1:8081",
+    "active_env": "blue",
+    "proxy_port": "8000"
+  },
+  "ssl": {
+    "email": "your-email@example.com",
+    "cert_path": "/etc/nginx/cert",
+    "webroot_path": "/etc/nginx/html",
+    "log_file": "/var/log/cert-renewal.log"
+  },
+  "nginx": {
+    "config_path": "/etc/nginx/conf.d/ruoyi.conf",
+    "html_path": "/etc/nginx/html",
+    "vue_path": "/etc/nginx/html/admin"
+  },
+  "jvm": {
+    "preset": 2,
+    "custom_opts": "",
+    "presets": {
+      "1": { "name": "1核2G", "xms": "512m", "xmx": "1g", "metaspace_size": "128m", "max_metaspace_size": "256m", "gc_threads": "1", "parallel_gc_threads": "1" },
+      "2": { "name": "3核4G", "xms": "1g", "xmx": "3g", "metaspace_size": "256m", "max_metaspace_size": "512m", "gc_threads": "3", "parallel_gc_threads": "3" },
+      "3": { "name": "4核8G", "xms": "2g", "xmx": "6g", "metaspace_size": "256m", "max_metaspace_size": "512m", "gc_threads": "4", "parallel_gc_threads": "4" }
+    }
+  }
+}

@@ -27,16 +27,16 @@ func (p *anthropicProvider) Model() string { return p.model }
 // ——— Anthropic 请求/响应结构 ———
 
 type anthropicRequest struct {
-	Model     string              `json:"model"`
-	MaxTokens int                 `json:"max_tokens"`
-	System    string              `json:"system,omitempty"`
-	Messages  []anthropicMessage  `json:"messages"`
-	Tools     []anthropicToolDef  `json:"tools,omitempty"`
-	Stream    bool                `json:"stream"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system,omitempty"`
+	Messages  []anthropicMessage `json:"messages"`
+	Tools     []anthropicToolDef `json:"tools,omitempty"`
+	Stream    bool               `json:"stream"`
 }
 
 type anthropicMessage struct {
-	Role    string        `json:"role"`
+	Role    string           `json:"role"`
 	Content []anthropicBlock `json:"content"`
 }
 
@@ -62,10 +62,10 @@ type anthropicToolDef struct {
 
 type anthropicResponse struct {
 	Content []struct {
-		Type  string `json:"type"`
-		Text  string `json:"text"`
-		ID    string `json:"id"`
-		Name  string `json:"name"`
+		Type  string      `json:"type"`
+		Text  string      `json:"text"`
+		ID    string      `json:"id"`
+		Name  string      `json:"name"`
 		Input interface{} `json:"input"`
 	} `json:"content"`
 	StopReason string `json:"stop_reason"`

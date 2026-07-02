@@ -26,7 +26,7 @@ func DefaultAIConfig(provider string) AIConfig {
 		Provider:       provider,
 		MaxTokens:      4096,
 		ContextLimit:   24000,
-		TimeoutSeconds: 60,
+		TimeoutSeconds: 120,
 	}
 	switch provider {
 	case "anthropic":
@@ -98,7 +98,13 @@ func SaveAIConfig(cfg AIConfig) error {
 
 // IsConfigured 判断 AI 配置是否足够可用
 func (c AIConfig) IsConfigured() bool {
-	if c.Provider == "" || c.Model == "" {
+	if c.Provider == "" {
+		return false
+	}
+	if c.Provider == "hub" {
+		return c.BaseURL != "" && c.APIKey != ""
+	}
+	if c.Model == "" {
 		return false
 	}
 	// ollama 不需要 API Key
@@ -126,6 +132,8 @@ func (c AIConfig) EffectiveBaseURL() string {
 		return "https://api.anthropic.com"
 	case "ollama":
 		return "http://localhost:11434/v1"
+	case "hub":
+		return ""
 	default:
 		return "https://api.openai.com/v1"
 	}

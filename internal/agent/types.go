@@ -12,7 +12,7 @@ type Message struct {
 
 // ToolCall AI 请求调用的单个工具
 type ToolCall struct {
-	ID        string `json:"id"`        // provider 返回的唯一 ID
+	ID        string `json:"id"` // provider 返回的唯一 ID
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"` // JSON 字符串
 }

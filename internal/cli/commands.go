@@ -3,7 +3,9 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -12,7 +14,9 @@ import (
 	"time"
 
 	"ruoyi-proxy/internal/agent"
+	"ruoyi-proxy/internal/buildinfo"
 	"ruoyi-proxy/internal/config"
+	"ruoyi-proxy/internal/hub"
 )
 
 // ServiceStatus 服务状态
@@ -651,24 +655,18 @@ func (c *CLI) MonitorMode() {
 	}
 }
 
-// StartAgent 启动 AI Agent 交互模式
-func (c *CLI) StartAgent() {
-	aiCfg, err := agent.LoadAIConfig()
-	if err != nil || !aiCfg.IsConfigured() {
-		fmt.Println("\033[1;33m⚠ AI 未配置，请先运行 agent-config 完成配置\033[0m")
-		return
-	}
+// RunAgentPrimary 启动 Agent 作为主交互入口
+func (c *CLI) RunAgentPrimary() {
+	aiCfg, _ := agent.LoadAIConfig()
 
 	execCtx := agent.BuildExecContext(c.currentService)
 
 	confirm := func(_ string) bool {
-		// 提示文字已由 printConfirmBox 在框内打印，此处只需读取输入
 		line, err := c.readLineWithPrompt("")
 		if err != nil {
 			return false
 		}
 		s := strings.ToLower(strings.TrimSpace(line))
-		// 空白（直接按 Enter）或任意确认词均视为同意
 		if s == "" || s == "y" || s == "yes" || s == "ok" ||
 			s == "确认" || s == "同意" || s == "好" || s == "好的" ||
 			s == "可以" || s == "是" || s == "是的" {
@@ -677,8 +675,20 @@ func (c *CLI) StartAgent() {
 		return false
 	}
 
+	var agentRef *agent.Agent
 	readInput := func(prompt string) (string, error) {
-		return c.readLineWithPrompt(prompt)
+		line, err := c.readLineWithPrompt(prompt)
+		if err != nil {
+			return "", err
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "/" && agentRef != nil {
+			if cmd, ok := agentRef.PickSlashCommand(""); ok {
+				return cmd, nil
+			}
+			return "", nil
+		}
+		return line, nil
 	}
 
 	print := func(s string) {
@@ -690,15 +700,112 @@ func (c *CLI) StartAgent() {
 		fmt.Printf("\033[1;31m✗ 创建 Agent 失败: %v\033[0m\n", err)
 		return
 	}
+	agentRef = a
+
+	a.SetOpsHooks(func(cmd string, args []string) bool {
+		return c.dispatchOpsCommand(a, cmd, args)
+	}, c.printHelp)
+	a.SetSlashMenuItems(c.buildSlashMenuItems)
 
 	c.agentCancel = a.Cancel
 	defer func() { c.agentCancel = nil }()
 
 	a.Run()
+	c.running = false
+}
+
+// buildSlashMenuItems 构建 / 命令菜单项（会话 + 运维）
+func (c *CLI) buildSlashMenuItems() []agent.SlashCommandItem {
+	return []agent.SlashCommandItem{
+		{Command: "/sessions", Description: "查看历史会话"},
+		{Command: "/load", Description: "加载历史会话"},
+		{Command: "/new", Description: "新建会话"},
+		{Command: "/current", Description: "当前会话信息"},
+		{Command: "/help", Description: "查看命令说明"},
+		{Command: "/commands", Description: "运维命令列表"},
+		{Command: "/start", Description: "启动服务"},
+		{Command: "/stop", Description: "停止服务"},
+		{Command: "/restart", Description: "重启服务"},
+		{Command: "/deploy", Description: "蓝绿部署"},
+		{Command: "/deploy-lowmem", Description: "低内存部署"},
+		{Command: "/status", Description: "服务状态"},
+		{Command: "/detail", Description: "详细状态"},
+		{Command: "/logs", Description: "查看日志"},
+		{Command: "/logs-follow", Description: "实时日志"},
+		{Command: "/switch", Description: "切换蓝绿环境"},
+		{Command: "/proxy-status", Description: "代理状态"},
+		{Command: "/proxy-start", Description: "启动代理"},
+		{Command: "/proxy-stop", Description: "停止代理"},
+		{Command: "/service-list", Description: "服务列表"},
+		{Command: "/service-switch", Description: "切换当前服务"},
+		{Command: "/config", Description: "查看配置"},
+		{Command: "/agent-config", Description: "配置 AI / Hub 注册"},
+		{Command: "/hub-token", Description: "生成 Hub 注册 Token"},
+		{Command: "/hub-status", Description: "Hub Spoke 列表"},
+		{Command: "/hub-spoke", Description: "查看单个 Spoke 详情"},
+		{Command: "/hub-enable", Description: "启用 Hub 网关"},
+		{Command: "/hub-disable", Description: "禁用 Hub 网关"},
+		{Command: "/hub-revoke", Description: "吊销 Spoke"},
+		{Command: "/self-check", Description: "运行环境自检"},
+		{Command: "/fix-nginx-hub", Description: "让 AI 修复 Nginx Hub 路由"},
+		{Command: "/init", Description: "环境初始化"},
+		{Command: "/cls", Description: "清屏"},
+		{Command: "/exit", Description: "退出"},
+	}
+}
+
+var knownOpsCommands = map[string]bool{
+	"start": true, "stop": true, "restart": true, "deploy": true, "deploy-lowmem": true,
+	"status": true, "logs": true, "logs-follow": true, "logs-search": true, "logs-export": true,
+	"init": true, "cert": true, "enable-https": true, "disable-https": true,
+	"proxy-start": true, "proxy-stop": true, "proxy-restart": true, "proxy-status": true,
+	"switch": true, "detail": true, "quick": true, "info": true, "monitor": true,
+	"quick-deploy": true, "config": true, "config-edit": true,
+	"service-add": true, "service-list": true, "service-remove": true, "service-switch": true,
+	"jvm-config": true, "agent-config": true, "commands": true, "cls": true,
+	"hub-enable": true, "hub-disable": true, "hub-token": true, "hub-status": true, "hub-spoke": true, "hub-revoke": true,
+	"self-check": true, "fix-nginx-hub": true,
+}
+
+// dispatchOpsCommand 处理 Agent 模式下的 /运维命令
+func (c *CLI) dispatchOpsCommand(a *agent.Agent, cmd string, args []string) bool {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	if !knownOpsCommands[cmd] {
+		return false
+	}
+	switch cmd {
+	case "agent-config":
+		c.AgentConfig(a)
+		return true
+	case "commands":
+		c.printHelp()
+		return true
+	case "self-check":
+		c.runSelfCheck()
+		return true
+	case "fix-nginx-hub":
+		c.runFixNginxHub(a)
+		return true
+	case "cls":
+		c.clearScreen()
+		return true
+	default:
+		input := cmd
+		if len(args) > 0 {
+			input += " " + strings.Join(args, " ")
+		}
+		c.handleCommand(input)
+		return true
+	}
+}
+
+// StartAgent 保留兼容别名
+func (c *CLI) StartAgent() {
+	c.RunAgentPrimary()
 }
 
 // AgentConfig 配置 AI 提供商
-func (c *CLI) AgentConfig() {
+func (c *CLI) AgentConfig(a ...*agent.Agent) {
 	aiCfg, _ := agent.LoadAIConfig()
 
 	fmt.Println("\033[1;34m═══ AI Agent 配置 ═══\033[0m")
@@ -710,19 +817,14 @@ func (c *CLI) AgentConfig() {
 	}
 	fmt.Println()
 
-	fmt.Println("选择提供商:")
-	fmt.Println("  1) anthropic  (Claude)")
-	fmt.Println("  2) openai     (GPT / 兼容 API)")
-	fmt.Println("  3) ollama     (本地模型)")
-	fmt.Println("  0) 取消")
-
 	choice, ok := c.selectSimpleMenu("选择提供商", []string{
 		"anthropic  (Claude)",
 		"openai     (GPT / 兼容 API)",
 		"ollama     (本地模型)",
+		"hub        (通过中心服务器转发 AI)",
 		"取消",
 	}, 0)
-	if !ok || choice == 3 {
+	if !ok || choice == 4 {
 		return
 	}
 
@@ -734,6 +836,8 @@ func (c *CLI) AgentConfig() {
 		provider = "openai"
 	case 2:
 		provider = "ollama"
+	case 3:
+		provider = "hub"
 	default:
 		fmt.Println("\033[1;31m✗ 无效选择\033[0m")
 		return
@@ -742,7 +846,34 @@ func (c *CLI) AgentConfig() {
 	defaults := agent.DefaultAIConfig(provider)
 	aiCfg.Provider = provider
 
-	if provider != "ollama" {
+	if provider == "hub" {
+		hubURL := strings.TrimSpace(aiCfg.BaseURL)
+		if hubURL == "" {
+			input, err := c.readLineWithPrompt("Hub 地址 (如 https://hub.example.com): ")
+			if err != nil || strings.TrimSpace(input) == "" {
+				c.printError("Hub 地址不能为空")
+				return
+			}
+			hubURL = strings.TrimSpace(input)
+		} else {
+			c.printInfo(fmt.Sprintf("使用已预置 Hub 地址: %s", hubURL))
+		}
+		aiCfg.BaseURL = strings.TrimRight(hubURL, "/")
+		c.printInfo("正在向 Hub 申请注册 Token...")
+		regToken, err := agent.RequestHubRegisterToken(aiCfg.BaseURL)
+		if err != nil {
+			c.printError(fmt.Sprintf("申请注册 Token 失败: %v", err))
+			return
+		}
+		secret, spokeID, err := agent.RegisterWithHub(aiCfg.BaseURL, regToken)
+		if err != nil {
+			c.printError(fmt.Sprintf("Hub 注册失败: %v", err))
+			return
+		}
+		aiCfg.APIKey = secret
+		aiCfg.Model = "hub-relay"
+		fmt.Printf("\033[1;32m✓ Hub 注册成功，Spoke ID: %s\033[0m\n", spokeID)
+	} else if provider != "ollama" {
 		apiKey, err := c.readLineWithPrompt(fmt.Sprintf("API Key (当前: %s): ", aiCfg.MaskedKey()))
 		if err != nil {
 			return
@@ -750,34 +881,62 @@ func (c *CLI) AgentConfig() {
 		if strings.TrimSpace(apiKey) != "" {
 			aiCfg.APIKey = strings.TrimSpace(apiKey)
 		}
-	}
 
-	baseURLPrompt := fmt.Sprintf("Base URL (留空使用默认 %s): ", defaults.BaseURL)
-	if aiCfg.BaseURL != "" {
-		baseURLPrompt = fmt.Sprintf("Base URL (当前: %s, 留空保持): ", aiCfg.BaseURL)
-	}
-	baseURL, err := c.readLineWithPrompt(baseURLPrompt)
-	if err != nil {
-		return
-	}
-	if strings.TrimSpace(baseURL) != "" {
-		aiCfg.BaseURL = strings.TrimSpace(baseURL)
-	} else if aiCfg.BaseURL == "" {
-		aiCfg.BaseURL = defaults.BaseURL
-	}
+		baseURLPrompt := fmt.Sprintf("Base URL (留空使用默认 %s): ", defaults.BaseURL)
+		if aiCfg.BaseURL != "" {
+			baseURLPrompt = fmt.Sprintf("Base URL (当前: %s, 留空保持): ", aiCfg.BaseURL)
+		}
+		baseURL, err := c.readLineWithPrompt(baseURLPrompt)
+		if err != nil {
+			return
+		}
+		if strings.TrimSpace(baseURL) != "" {
+			aiCfg.BaseURL = strings.TrimSpace(baseURL)
+		} else if aiCfg.BaseURL == "" {
+			aiCfg.BaseURL = defaults.BaseURL
+		}
 
-	modelPrompt := fmt.Sprintf("模型名称 (留空使用默认 %s): ", defaults.Model)
-	if aiCfg.Model != "" {
-		modelPrompt = fmt.Sprintf("模型名称 (当前: %s, 留空保持): ", aiCfg.Model)
-	}
-	model, err := c.readLineWithPrompt(modelPrompt)
-	if err != nil {
-		return
-	}
-	if strings.TrimSpace(model) != "" {
-		aiCfg.Model = strings.TrimSpace(model)
-	} else if aiCfg.Model == "" {
-		aiCfg.Model = defaults.Model
+		modelPrompt := fmt.Sprintf("模型名称 (留空使用默认 %s): ", defaults.Model)
+		if aiCfg.Model != "" {
+			modelPrompt = fmt.Sprintf("模型名称 (当前: %s, 留空保持): ", aiCfg.Model)
+		}
+		model, err := c.readLineWithPrompt(modelPrompt)
+		if err != nil {
+			return
+		}
+		if strings.TrimSpace(model) != "" {
+			aiCfg.Model = strings.TrimSpace(model)
+		} else if aiCfg.Model == "" {
+			aiCfg.Model = defaults.Model
+		}
+	} else {
+		baseURLPrompt := fmt.Sprintf("Base URL (留空使用默认 %s): ", defaults.BaseURL)
+		if aiCfg.BaseURL != "" {
+			baseURLPrompt = fmt.Sprintf("Base URL (当前: %s, 留空保持): ", aiCfg.BaseURL)
+		}
+		baseURL, err := c.readLineWithPrompt(baseURLPrompt)
+		if err != nil {
+			return
+		}
+		if strings.TrimSpace(baseURL) != "" {
+			aiCfg.BaseURL = strings.TrimSpace(baseURL)
+		} else if aiCfg.BaseURL == "" {
+			aiCfg.BaseURL = defaults.BaseURL
+		}
+
+		modelPrompt := fmt.Sprintf("模型名称 (留空使用默认 %s): ", defaults.Model)
+		if aiCfg.Model != "" {
+			modelPrompt = fmt.Sprintf("模型名称 (当前: %s, 留空保持): ", aiCfg.Model)
+		}
+		model, err := c.readLineWithPrompt(modelPrompt)
+		if err != nil {
+			return
+		}
+		if strings.TrimSpace(model) != "" {
+			aiCfg.Model = strings.TrimSpace(model)
+		} else if aiCfg.Model == "" {
+			aiCfg.Model = defaults.Model
+		}
 	}
 
 	if err := agent.SaveAIConfig(aiCfg); err != nil {
@@ -786,4 +945,265 @@ func (c *CLI) AgentConfig() {
 	}
 
 	fmt.Printf("\033[1;32m✔ 配置已保存 — 提供商: %s  模型: %s\033[0m\n", aiCfg.Provider, aiCfg.Model)
+	if len(a) > 0 && a[0] != nil {
+		if err := a[0].ReloadConfig(aiCfg); err != nil {
+			c.printWarning(fmt.Sprintf("热重载失败: %v", err))
+		} else {
+			c.printInfo("AI 配置已热重载，无需重启")
+		}
+	}
+	if provider == "hub" {
+		c.printInfo("Hub 注册已完成；如需环境自检，请运行 /self-check")
+	}
+}
+
+func mgmtBaseURL() string {
+	port := config.MgmtPort
+	if strings.HasPrefix(port, ":") {
+		return "http://127.0.0.1" + port
+	}
+	return "http://" + port
+}
+
+func (c *CLI) handleHubEnable(enable bool) {
+	if err := hub.SaveHubEnabled(enable); err != nil {
+		c.printError(fmt.Sprintf("保存 Hub 配置失败: %v", err))
+		return
+	}
+	if enable {
+		c.printSuccess("Hub AI 网关已启用")
+		c.printInfo("请重启代理服务使路由生效，然后在 Hub 上运行 /hub-token 生成注册 Token")
+	} else {
+		c.printSuccess("Hub AI 网关已禁用")
+	}
+	c.promptProxyRestart()
+}
+
+func (c *CLI) handleHubToken() {
+	settings, _ := hub.LoadHubSettings()
+	hubActive := settings.Enabled || buildinfo.IsHub()
+	if !hubActive {
+		c.printError("Hub 未启用，请运行 /hub-enable 后重启代理")
+		return
+	}
+
+	// 优先走管理端口（代理进程内生成）
+	if token, ok := c.fetchHubTokenViaHTTP(); ok {
+		c.printHubToken(token)
+		return
+	}
+
+	// 回退：CLI 本地生成并写入 configs/hub_pending_token.json，供代理进程校验注册
+	if err := hub.LoadSpokes(); err != nil {
+		c.printWarning(fmt.Sprintf("加载 spoke 注册表: %v", err))
+	}
+	token, err := hub.GenerateRegisterToken()
+	if err != nil {
+		c.printError(fmt.Sprintf("生成 Token 失败: %v", err))
+		return
+	}
+	c.printHubToken(token)
+	c.printWarning("管理端口 /hub/token 不可用（常见原因：旧版代理在运行或未用 Hub 包启动）")
+	c.printInfo("请确保 Hub 网关已启动: ./ruoyi-proxy-linux-hub  或  /proxy-restart")
+}
+
+func (c *CLI) fetchHubTokenViaHTTP() (string, bool) {
+	resp, err := http.Post(mgmtBaseURL()+"/hub/token", "application/json", nil)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", false
+	}
+	token, _ := out["token"].(string)
+	return token, token != ""
+}
+
+func (c *CLI) printHubToken(token string) {
+	c.printSuccess("注册 Token 已生成（15 分钟内有效）")
+	fmt.Printf("\033[1;36mToken: %s\033[0m\n", token)
+	c.printInfo("在 spoke 服务器运行 /agent-config，选择 hub 并填入此 Token")
+}
+
+func (c *CLI) handleHubStatus() {
+	var out struct {
+		Count  int               `json:"count"`
+		Spokes []hub.SpokeRecord `json:"spokes"`
+	}
+
+	resp, err := http.Get(mgmtBaseURL() + "/hub/status")
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if json.Unmarshal(body, &out) == nil {
+			c.printHubStatusList(out.Count, out.Spokes)
+			return
+		}
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// 回退：读本地注册表
+	if err := hub.LoadSpokes(); err != nil {
+		c.printError(fmt.Sprintf("查询失败: %v", err))
+		return
+	}
+	spokes := hub.ListSpokes()
+	c.printHubStatusList(len(spokes), spokes)
+}
+
+func (c *CLI) handleHubSpoke(spokeID string) {
+	spokeID = strings.TrimSpace(spokeID)
+	if spokeID == "" {
+		c.printError("请指定 spoke ID，例如: /hub-spoke spoke-abc12345")
+		return
+	}
+
+	resp, err := http.Get(mgmtBaseURL() + "/hub/spoke?spoke=" + url.QueryEscape(spokeID))
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var item hub.SpokeRecord
+		if json.Unmarshal(body, &item) == nil {
+			c.printHubSpokeDetail(item)
+			return
+		}
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// 回退：读本地注册表
+	if err := hub.LoadSpokes(); err != nil {
+		c.printError(fmt.Sprintf("查询失败: %v", err))
+		return
+	}
+	item, ok := hub.GetSpoke(spokeID)
+	if !ok {
+		c.printError("spoke 不存在: " + spokeID)
+		return
+	}
+	c.printHubSpokeDetail(item)
+}
+
+// runFixNginxHub 提示用户直接让 AI 修复 Nginx Hub 路由
+func (c *CLI) runFixNginxHub(a *agent.Agent) {
+	if a == nil {
+		c.printError("Agent 未启动")
+		return
+	}
+	c.printInfo("请在下方输入框直接告诉 AI：请帮我修复 Nginx 的 Hub 路由")
+	c.printInfo("AI 会读取配置、删除旧块、插入 location ^~ /__hub__/ 并验证 reload")
+}
+
+func (c *CLI) printHubStatusList(count int, spokes []hub.SpokeRecord) {
+	fmt.Printf("\n\033[1;34m已注册 Spoke (%d)\033[0m\n", count)
+	for _, s := range spokes {
+		status := "活跃"
+		if s.Revoked {
+			status = "已吊销"
+		}
+		fmt.Printf("  \033[1;36m%s\033[0m  [%s]  创建: %s  最近: %s\n",
+			s.ID, status, s.CreatedAt.Format("2006-01-02 15:04"), s.LastSeen.Format("2006-01-02 15:04"))
+		if s.Profile != nil {
+			p := s.Profile
+			label := p.Label
+			if label == "" {
+				label = p.Hostname
+			}
+			fmt.Printf("      用途: %s  项目: %s (%s)\n", label, p.ProjectName, p.ProjectType)
+			if p.Description != "" {
+				fmt.Printf("      说明: %s\n", p.Description)
+			}
+			if p.Domain != "" {
+				fmt.Printf("      域名: %s\n", p.Domain)
+			}
+			if len(p.Services) > 0 {
+				fmt.Printf("      服务: ")
+				for i, svc := range p.Services {
+					if i > 0 {
+						fmt.Print(", ")
+					}
+					fmt.Printf("%s(%s)", svc.ID, svc.ActiveEnv)
+				}
+				fmt.Println()
+			}
+		}
+	}
+	fmt.Println()
+}
+
+func (c *CLI) printHubSpokeDetail(s hub.SpokeRecord) {
+	status := "活跃"
+	if s.Revoked {
+		status = "已吊销"
+	}
+	fmt.Printf("\n\033[1;34mSpoke 详情: %s\033[0m\n", s.ID)
+	fmt.Printf("  状态: %s\n", status)
+	fmt.Printf("  创建: %s\n", s.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  最近: %s\n", s.LastSeen.Format("2006-01-02 15:04:05"))
+	if s.Profile == nil {
+		fmt.Println("  档案: 未上报（请在 Spoke 端重新运行 /agent-config 或重启 CLI 触发引导）")
+		fmt.Println()
+		return
+	}
+	p := s.Profile
+	label := p.Label
+	if label == "" {
+		label = p.Hostname
+	}
+	fmt.Printf("  用途: %s\n", label)
+	fmt.Printf("  主机: %s\n", p.Hostname)
+	if p.ProjectName != "" || p.ProjectType != "" {
+		fmt.Printf("  项目: %s (%s)\n", p.ProjectName, p.ProjectType)
+	}
+	if p.Domain != "" {
+		fmt.Printf("  域名: %s\n", p.Domain)
+	}
+	if p.AppHome != "" {
+		fmt.Printf("  目录: %s\n", p.AppHome)
+	}
+	if p.Description != "" {
+		fmt.Printf("  说明: %s\n", p.Description)
+	}
+	if !p.UpdatedAt.IsZero() {
+		fmt.Printf("  档案更新时间: %s\n", p.UpdatedAt.Format("2006-01-02 15:04:05"))
+	}
+	if len(p.Services) > 0 {
+		fmt.Println("  服务:")
+		for _, svc := range p.Services {
+			fmt.Printf("    - %s  %s  %s  %s\n", svc.ID, svc.Name, svc.ProjectType, svc.ActiveEnv)
+		}
+	}
+	fmt.Println()
+}
+
+func (c *CLI) handleHubRevoke(spokeID string) {
+	if !c.confirmDangerAction(fmt.Sprintf("吊销 Spoke: %s", spokeID), []string{"吊销后该节点将无法再通过 Hub 调用 AI"}) {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, mgmtBaseURL()+"/hub/revoke?spoke="+spokeID, nil)
+	if err != nil {
+		c.printError(err.Error())
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.printError(fmt.Sprintf("请求失败: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		c.printError(fmt.Sprintf("吊销失败 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
+		return
+	}
+	c.printSuccess(fmt.Sprintf("Spoke[%s] 已吊销", spokeID))
 }

@@ -287,6 +287,29 @@ var AllTools = []ToolDef{
 			"required": []string{"command"},
 		},
 	},
+	{
+		Name:        "configure_service",
+		Description: "为指定服务注册自定义控制脚本路径和项目类型（AI 生成适配脚本后调用）。需要用户确认",
+		ReadOnly:    false,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"service_id": map[string]interface{}{
+					"type":        "string",
+					"description": "服务 ID，留空则使用当前服务",
+				},
+				"script_path": map[string]interface{}{
+					"type":        "string",
+					"description": "控制脚本路径，如 scripts/service-myapp.sh",
+				},
+				"project_type": map[string]interface{}{
+					"type":        "string",
+					"description": "项目类型：java/node/python/go/docker 等",
+				},
+			},
+			"required": []string{"script_path"},
+		},
+	},
 }
 
 // ——— 工具执行器 ———
@@ -411,6 +434,11 @@ func (e *ToolExecutor) Execute(name, argsJSON string) (string, error) {
 			}
 		}
 		return e.runShell(command, workdir, time.Duration(timeout)*time.Second)
+	case "configure_service":
+		serviceID, _ := args["service_id"].(string)
+		scriptPath, _ := args["script_path"].(string)
+		projectType, _ := args["project_type"].(string)
+		return e.configureService(serviceID, scriptPath, projectType)
 	default:
 		return "", fmt.Errorf("未知工具: %s", name)
 	}
@@ -471,8 +499,9 @@ func (e *ToolExecutor) getStatus() (string, error) {
 }
 
 func (e *ToolExecutor) getLogs(logName, keyword string, lines int) (string, error) {
-	if e.execCtx.ScriptPath == "" {
-		return "", fmt.Errorf("未找到 service.sh 脚本")
+	scriptPath, err := e.resolveScriptPath()
+	if err != nil {
+		return "", err
 	}
 
 	cfg, err := config.LoadConfig()
@@ -488,13 +517,13 @@ func (e *ToolExecutor) getLogs(logName, keyword string, lines int) (string, erro
 	var cmd *exec.Cmd
 	linesStr := fmt.Sprintf("%d", lines)
 	if logName != "" && keyword != "" {
-		cmd = exec.Command("bash", e.execCtx.ScriptPath, "logs-search", logName, keyword, linesStr)
+		cmd = exec.Command("bash", scriptPath, "logs-search", logName, keyword, linesStr)
 	} else if logName != "" {
-		cmd = exec.Command("bash", e.execCtx.ScriptPath, "logs-search", logName, linesStr)
+		cmd = exec.Command("bash", scriptPath, "logs-search", logName, linesStr)
 	} else if keyword != "" {
-		cmd = exec.Command("bash", e.execCtx.ScriptPath, "logs-search", keyword, linesStr)
+		cmd = exec.Command("bash", scriptPath, "logs-search", keyword, linesStr)
 	} else {
-		cmd = exec.Command("bash", e.execCtx.ScriptPath, "logs", linesStr)
+		cmd = exec.Command("bash", scriptPath, "logs", linesStr)
 	}
 	cmd.Env = env
 	return runWithTimeout(cmd, 15*time.Second)
@@ -513,6 +542,9 @@ func (e *ToolExecutor) getConfig() (string, error) {
 			sb.WriteString(fmt.Sprintf("  蓝色: %s  绿色: %s  当前: %s\n",
 				svc.BlueTarget, svc.GreenTarget, svc.ActiveEnv))
 			sb.WriteString(fmt.Sprintf("  JAR: %s  AppName: %s\n", svc.JarFile, svc.AppName))
+			if svc.ScriptPath != "" {
+				sb.WriteString(fmt.Sprintf("  控制脚本: %s  项目类型: %s\n", svc.ScriptPath, svc.ProjectType))
+			}
 		}
 	}
 
@@ -740,8 +772,9 @@ func (e *ToolExecutor) systemdInfo(action, svcName string, lines int) (string, e
 // ——— 写操作工具实现 ───────────────────────────────────────────
 
 func (e *ToolExecutor) serviceControl(action string) (string, error) {
-	if e.execCtx.ScriptPath == "" {
-		return "", fmt.Errorf("未找到 service.sh 脚本")
+	scriptPath, err := e.resolveScriptPath()
+	if err != nil {
+		return "", err
 	}
 	if action != "start" && action != "stop" && action != "restart" && action != "deploy" && action != "deploy-lowmem" {
 		return "", fmt.Errorf("无效操作: %s", action)
@@ -757,7 +790,7 @@ func (e *ToolExecutor) serviceControl(action string) (string, error) {
 	}
 
 	env := buildScriptEnv(e.execCtx, svc)
-	cmd := exec.Command("bash", e.execCtx.ScriptPath, action)
+	cmd := exec.Command("bash", scriptPath, action)
 	cmd.Env = env
 	return runWithTimeout(cmd, 120*time.Second)
 }
@@ -1044,6 +1077,67 @@ func (e *ToolExecutor) runShell(command, workdir string, timeout time.Duration) 
 		return fmt.Sprintf("命令输出:\n%s\n✗ %v", out, err), nil
 	}
 	return out, nil
+}
+
+func (e *ToolExecutor) configureService(serviceID, scriptPath, projectType string) (string, error) {
+	if strings.TrimSpace(scriptPath) == "" {
+		return "", fmt.Errorf("请提供 script_path")
+	}
+	if serviceID == "" {
+		serviceID = e.execCtx.CurrentService
+	}
+	absPath := scriptPath
+	if !filepath.IsAbs(absPath) {
+		var err error
+		absPath, err = filepath.Abs(scriptPath)
+		if err != nil {
+			absPath = scriptPath
+		}
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		return "", fmt.Errorf("脚本不存在: %s", scriptPath)
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", fmt.Errorf("读取配置失败: %v", err)
+	}
+	svc := cfg.GetService(serviceID)
+	if svc == nil {
+		return "", fmt.Errorf("未找到服务配置: %s", serviceID)
+	}
+	svc.ScriptPath = scriptPath
+	if projectType != "" {
+		svc.ProjectType = projectType
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		return "", fmt.Errorf("保存配置失败: %v", err)
+	}
+	return fmt.Sprintf("服务[%s]已注册控制脚本: %s（项目类型: %s）", serviceID, scriptPath, svc.ProjectType), nil
+}
+
+func (e *ToolExecutor) resolveScriptPath() (string, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return "", fmt.Errorf("读取配置失败: %v", err)
+	}
+	svc := cfg.GetService(e.execCtx.CurrentService)
+	if svc != nil && svc.ScriptPath != "" {
+		p := svc.ScriptPath
+		if !filepath.IsAbs(p) {
+			if abs, err := filepath.Abs(p); err == nil {
+				p = abs
+			}
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+		return "", fmt.Errorf("服务[%s]的控制脚本不存在: %s", e.execCtx.CurrentService, svc.ScriptPath)
+	}
+	if e.execCtx.ScriptPath == "" {
+		return "", fmt.Errorf("未找到 service.sh 脚本")
+	}
+	return e.execCtx.ScriptPath, nil
 }
 
 // ——— 备份相关 ───────────────────────────────────────────────

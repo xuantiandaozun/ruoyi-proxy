@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	"github.com/chzyer/readline"
 	"golang.org/x/term"
 
+	"ruoyi-proxy/internal/bootstrap"
+	"ruoyi-proxy/internal/buildinfo"
 	"ruoyi-proxy/internal/config"
 )
 
@@ -89,8 +92,38 @@ func (c *CLI) Start() {
 		readline.PcItem("service-remove"),
 		readline.PcItem("service-switch"),
 		readline.PcItem("jvm-config"),
-		readline.PcItem("agent"),
 		readline.PcItem("agent-config"),
+		readline.PcItem("hub-enable"),
+		readline.PcItem("hub-disable"),
+		readline.PcItem("hub-token"),
+		readline.PcItem("hub-status"),
+		readline.PcItem("hub-spoke"),
+		readline.PcItem("hub-revoke"),
+		readline.PcItem("self-check"),
+		readline.PcItem("fix-nginx-hub"),
+		readline.PcItem("/help"),
+		readline.PcItem("/commands"),
+		readline.PcItem("/start"),
+		readline.PcItem("/stop"),
+		readline.PcItem("/restart"),
+		readline.PcItem("/deploy"),
+		readline.PcItem("/deploy-lowmem"),
+		readline.PcItem("/status"),
+		readline.PcItem("/logs"),
+		readline.PcItem("/logs-follow"),
+		readline.PcItem("/agent-config"),
+		readline.PcItem("/hub-token"),
+		readline.PcItem("/hub-status"),
+		readline.PcItem("/hub-spoke"),
+		readline.PcItem("/hub-enable"),
+		readline.PcItem("/hub-disable"),
+		readline.PcItem("/hub-revoke"),
+		readline.PcItem("/self-check"),
+		readline.PcItem("/fix-nginx-hub"),
+		readline.PcItem("/sessions"),
+		readline.PcItem("/load"),
+		readline.PcItem("/new"),
+		readline.PcItem("/exit"),
 	)
 
 	// 初始化脚本和配置文件
@@ -99,7 +132,6 @@ func (c *CLI) Start() {
 	}
 
 	c.printBanner()
-	c.printHelp()
 
 	// 设置信号处理，捕获 Ctrl+C
 	sigChan := make(chan os.Signal, 1)
@@ -118,22 +150,8 @@ func (c *CLI) Start() {
 	}()
 
 	for c.running {
-		input, err := c.rl.Readline()
-		if err != nil {
-			if err.Error() == "Interrupt" {
-				fmt.Println()
-				c.running = false
-				break
-			}
-			break
-		}
-
-		input = strings.TrimSpace(input)
-		if input == "" {
-			continue
-		}
-
-		c.handleCommand(input)
+		c.RunAgentPrimary()
+		break
 	}
 
 	fmt.Println("\n再见！")
@@ -143,6 +161,9 @@ func (c *CLI) Start() {
 func (c *CLI) readLine() (string, error) {
 	line, err := c.rl.Readline()
 	if err != nil {
+		if err == readline.ErrInterrupt {
+			return "", io.EOF
+		}
 		return "", err
 	}
 	return line, nil
@@ -155,6 +176,9 @@ func (c *CLI) readLineWithPrompt(prompt string) (string, error) {
 	line, err := c.rl.Readline()
 	c.rl.SetPrompt(oldPrompt)
 	if err != nil {
+		if err == readline.ErrInterrupt {
+			return "", io.EOF
+		}
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
@@ -398,68 +422,55 @@ func (c *CLI) printBanner() {
 `
 	fmt.Println("\033[1;34m" + banner + "\033[0m")
 	fmt.Printf("当前服务: \033[1;32m%s\033[0m\n", c.currentService)
-	fmt.Println("输入 '\033[1;33mhelp\033[0m' 查看所有命令")
+	if buildinfo.Profile != "default" {
+		fmt.Printf("构建角色: \033[1;36m%s\033[0m\n", buildinfo.ProfileLabel())
+	}
+	fmt.Println("输入 '\033[1;33m/\033[0m' 打开命令菜单（↑/↓ 选择），'\033[1;33m/help\033[0m' 查看说明")
 }
 
-// printHelp 打印帮助信息
+// printHelp 打印帮助信息（运维斜杠命令）
 func (c *CLI) printHelp() {
 	fmt.Println()
-	fmt.Println("\033[1;32m可用命令:\033[0m")
+	fmt.Println("\033[1;32m运维命令（在 Agent 提示符下输入 /xxx）:\033[0m")
 	fmt.Println()
 	fmt.Println("  \033[1;33m服务管理:\033[0m")
-	fmt.Println("    start          - 启动服务")
-	fmt.Println("    stop           - 停止服务")
-	fmt.Println("    restart        - 重启服务")
-	fmt.Println("    deploy         - 蓝绿部署新版本")
-	fmt.Println("    deploy-lowmem  - 低内存部署（先停旧服务再启动新服务）")
-	fmt.Println("    quick-deploy   - 快速部署向导")
-	fmt.Println("    status         - 查看服务状态")
-	fmt.Println("    detail         - 查看详细状态")
-	fmt.Println("    logs [行数]    - 查看日志（默认600行）")
-	fmt.Println("    logs-follow    - 实时查看日志")
-	fmt.Println("    logs-search [日志名/日志文件] [关键字] [行数] | logs-export [日志名/日志文件] [输出名] - 日志查询/导出（行数默认600）")
-	fmt.Println("    logs-search|logs-export / - 进入日志文件选择器；? - 列出日志文件")
+	fmt.Println("    /start          - 启动服务")
+	fmt.Println("    /stop           - 停止服务")
+	fmt.Println("    /restart        - 重启服务")
+	fmt.Println("    /deploy         - 蓝绿部署新版本")
+	fmt.Println("    /deploy-lowmem  - 低内存部署")
+	fmt.Println("    /quick-deploy   - 快速部署向导")
+	fmt.Println("    /status         - 查看服务状态")
+	fmt.Println("    /detail         - 查看详细状态")
+	fmt.Println("    /logs [行数]    - 查看日志")
+	fmt.Println("    /logs-follow    - 实时查看日志")
 	fmt.Println()
 	fmt.Println("  \033[1;33m环境管理:\033[0m")
-	fmt.Println("    init           - 完整初始化（环境安装+服务配置+启动）")
-	fmt.Println("    cert <域名>    - 申请SSL证书")
-	fmt.Println("    enable-https   - 开启HTTPS（切换到HTTPS配置）")
-	fmt.Println("    disable-https  - 关闭HTTPS（切换到HTTP配置）")
+	fmt.Println("    /init           - 完整初始化")
+	fmt.Println("    /cert <域名>    - 申请SSL证书")
+	fmt.Println("    /enable-https   - 开启HTTPS")
+	fmt.Println("    /disable-https  - 关闭HTTPS")
 	fmt.Println()
 	fmt.Println("  \033[1;33m代理管理:\033[0m")
-	fmt.Println("    proxy-start    - 启动代理服务")
-	fmt.Println("    proxy-stop     - 停止代理服务")
-	fmt.Println("    proxy-restart  - 重启代理服务")
-	fmt.Println("    proxy-status   - 查看代理状态")
-	fmt.Println("    switch [env]   - 切换环境（不带参数则交互式选择）")
+	fmt.Println("    /proxy-start    /proxy-stop    /proxy-restart    /proxy-status")
+	fmt.Println("    /switch [env]   - 切换蓝绿环境")
 	fmt.Println()
-	fmt.Println("  \033[1;33m服务管理:\033[0m")
-	fmt.Println("    service-add    - 添加新服务")
-	fmt.Println("    service-list   - 查看服务列表")
-	fmt.Println("    service-remove - 删除服务")
-	fmt.Println("    service-switch - 切换当前服务")
+	fmt.Println("  \033[1;33m服务与配置:\033[0m")
+	fmt.Println("    /service-list   /service-add   /service-remove   /service-switch")
+	fmt.Println("    /config         /config-edit   /jvm-config")
 	fmt.Println()
-	fmt.Println("  \033[1;33m配置管理:\033[0m")
-	fmt.Println("    config         - 查看完整配置")
-	fmt.Println("    config-edit    - 编辑配置")
-	fmt.Println("    jvm-config     - JVM参数配置")
-	fmt.Println()
-	fmt.Println("  \033[1;33mAI Agent:\033[0m")
-	fmt.Println("    agent          - 进入 AI 对话模式（自然语言运维）")
-	fmt.Println("    agent-config   - 配置 AI 提供商（key/model/url）")
-	fmt.Println()
-	fmt.Println("  \033[1;33m系统信息:\033[0m")
-	fmt.Println("    info           - 显示系统信息")
-	fmt.Println("    monitor        - 实时监控模式")
-	fmt.Println("    quick          - 显示快捷命令列表")
+	fmt.Println("  \033[1;33mAI 与 Hub:\033[0m")
+	fmt.Println("    /agent-config   - 配置 AI 提供商")
+	fmt.Println("    /hub-enable     /hub-disable  - Hub 网关开关（需重启代理）")
+	fmt.Println("    /hub-token      /hub-status [id]   /hub-spoke <id>   /hub-revoke <id>")
 	fmt.Println()
 	fmt.Println("  \033[1;33m其他:\033[0m")
-	fmt.Println("    help           - 显示此帮助信息")
-	fmt.Println("    clear          - 清屏")
-	fmt.Println("    exit           - 退出管理面板")
+	fmt.Println("    /commands       - 显示此列表")
+	fmt.Println("    /cls            - 清屏")
+	fmt.Println("    clear           - 清空 AI 对话历史")
+	fmt.Println("    /exit           - 退出")
 	fmt.Println()
-	fmt.Println("\033[1;36m提示:\033[0m 大部分命令支持简写，例如 'h' = 'help', 'q' = 'exit'")
-	fmt.Println("\033[1;36m交互:\033[0m 支持 Tab 补全，部分列表支持 ↑/↓ 或 j/k 选择")
+	fmt.Println("\033[1;36m提示:\033[0m 也可直接用自然语言描述运维需求，AI 会自动调用工具")
 	fmt.Println()
 }
 
@@ -621,8 +632,35 @@ func (c *CLI) handleCommand(input string) {
 	case "jvm-config":
 		c.JVMConfig()
 
-	case "agent":
-		c.StartAgent()
+	case "hub-enable":
+		c.handleHubEnable(true)
+
+	case "hub-disable":
+		c.handleHubEnable(false)
+
+	case "hub-token":
+		c.handleHubToken()
+
+	case "hub-status":
+		if len(args) > 0 {
+			c.handleHubSpoke(args[0])
+			return
+		}
+		c.handleHubStatus()
+
+	case "hub-spoke":
+		if len(args) == 0 {
+			c.printError("请指定 spoke ID，例如: hub-spoke spoke-abc12345")
+			return
+		}
+		c.handleHubSpoke(args[0])
+
+	case "hub-revoke":
+		if len(args) == 0 {
+			c.printError("请指定 spoke ID，例如: hub-revoke spoke-abc12345")
+			return
+		}
+		c.handleHubRevoke(args[0])
 
 	case "agent-config":
 		c.AgentConfig()
@@ -701,8 +739,8 @@ func (c *CLI) startProxyService() {
 		return
 	}
 
-	// 后台启动代理服务
-	cmd := exec.Command(proxyBin)
+	// 后台启动代理服务；Spoke 包无参数会进入 CLI，因此显式传入 proxy 模式。
+	cmd := exec.Command(proxyBin, "proxy")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 
@@ -1056,8 +1094,25 @@ func (c *CLI) findConfigFile() string {
 
 // findProxyBinary 查找代理程序
 func (c *CLI) findProxyBinary() string {
-	paths := []string{
+	paths := []string{}
+	if buildinfo.IsHub() {
+		paths = append(paths,
+			"./ruoyi-proxy-linux-hub",
+			"./bin/ruoyi-proxy-linux-hub",
+			"bin/ruoyi-proxy-linux-hub",
+		)
+	}
+	if buildinfo.IsSpoke() {
+		paths = append(paths,
+			"./ruoyi-proxy-linux-spoke",
+			"./bin/ruoyi-proxy-linux-spoke",
+			"bin/ruoyi-proxy-linux-spoke",
+		)
+	}
+	paths = append(paths,
 		// Makefile 构建的文件名（优先查找当前目录）
+		"./ruoyi-proxy-linux-hub",
+		"./ruoyi-proxy-linux-spoke",
 		"./ruoyi-proxy-linux", // Linux版本（当前目录）
 		"./ruoyi-proxy",       // Windows版本（当前目录）
 		"./ruoyi-proxy.exe",
@@ -1074,7 +1129,7 @@ func (c *CLI) findProxyBinary() string {
 		"./bin/proxy.exe",
 		"bin/proxy",
 		"bin/proxy.exe",
-	}
+	)
 
 	for _, path := range paths {
 		if _, err := os.Stat(path); err == nil {
@@ -1476,6 +1531,7 @@ func (c *CLI) addService() {
 	}
 
 	c.printSuccess(fmt.Sprintf("服务[%s]已添加", serviceID))
+	c.printInfo("如非标准 Java(jar) 项目，可用自然语言描述项目类型，AI 会自动检测并生成适配脚本")
 	c.promptProxyRestart()
 
 	// ????????
@@ -1859,9 +1915,9 @@ func (c *CLI) executeServiceCommand(command string) {
 	}
 	c.printInfo(fmt.Sprintf("操作服务: %s (%s)", serviceName, c.currentService))
 
-	scriptPath := c.findScript("service.sh")
+	scriptPath := c.resolveServiceScript(svc)
 	if scriptPath == "" {
-		c.printError("未找到脚本 service.sh")
+		c.printError("未找到 service 控制脚本")
 		return
 	}
 
@@ -1940,9 +1996,9 @@ func (c *CLI) executeServiceLogCommand(command string, args ...string) {
 	}
 	c.printInfo(fmt.Sprintf("查看服务日志: %s (%s)", serviceName, c.currentService))
 
-	scriptPath := c.findScript("service.sh")
+	scriptPath := c.resolveServiceScript(svc)
 	if scriptPath == "" {
-		c.printError("未找到脚本 service.sh")
+		c.printError("未找到 service 控制脚本")
 		return
 	}
 
@@ -2330,6 +2386,32 @@ func (c *CLI) interactiveLogsExportWithBase(base string) {
 	}
 
 	c.executeServiceLogCommand("logs-export", args...)
+}
+
+// resolveServiceScript 解析当前服务生效的控制脚本路径
+func (c *CLI) resolveServiceScript(svc *config.ServiceConfig) string {
+	if svc != nil && svc.ScriptPath != "" {
+		candidates := []string{svc.ScriptPath, "./" + svc.ScriptPath}
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				abs, err := filepath.Abs(p)
+				if err == nil {
+					return abs
+				}
+				return p
+			}
+		}
+	}
+	return c.findScript("service.sh")
+}
+
+// runSelfCheck 手动运行环境自检
+func (c *CLI) runSelfCheck() {
+	io := &bootstrap.CLIO{
+		Print: func(s string) { fmt.Println(s) },
+		Ask:   c.readLineWithPrompt,
+	}
+	bootstrap.RunSelfCheck(io)
 }
 
 // extractPort 从URL中提取端口号

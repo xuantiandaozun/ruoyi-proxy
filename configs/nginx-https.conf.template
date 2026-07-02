@@ -58,6 +58,20 @@ server {
         }
     }
     
+    # Hub AI 网关（Spoke 注册与 Chat 转发）
+    # 必须放在通用 / 规则之前，且精确匹配 /__hub__/ 前缀
+    location ^~ /__hub__/ {
+        proxy_pass http://ruoyi_backend/__hub__/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_connect_timeout 120s;
+        proxy_send_timeout 900s;
+        proxy_read_timeout 900s;
+    }
+
     # API代理到Go程序
     location /api/ {
         proxy_pass http://ruoyi_backend/;
