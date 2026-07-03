@@ -109,6 +109,9 @@ configs/sync_config.json     # File sync settings
 - Important files auto-backed up to `~/.ruoyi-backup/<timestamp>/` before modification
 - Tool output truncated to 3000 chars; Anthropic requires non-empty tool result strings
 - AI config stored in `configs/app_config.json` under `"ai"` key, not a separate file
+- System prompt adapts by build profile (Hub/Spoke/default): probes deployment mode before assuming blue-green proxy; injects `spoke_profile.json` or registered Spoke list from `hub_spokes.json`
+- `get_status` uses adaptive health checks (script status → project-type HTTP/TCP → Java actuator only when applicable)
+- Spoke `/self-check` (`RunSpokeChecks`): base env + Hub connectivity; :8000 proxy is optional (skipped if not listening)
 
 ## CLI Architecture
 

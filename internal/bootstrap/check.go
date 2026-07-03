@@ -48,6 +48,38 @@ func runEnvChecks(includeHubRoute bool) []CheckItem {
 	return items
 }
 
+// RunSpokeChecks Spoke 节点自检（基础环境 + Hub 连接，不含蓝绿代理）
+func RunSpokeChecks() []CheckItem {
+	items := runEnvChecks(false)
+	items = append(items, checkSpokeHubConnection())
+	proxyItem := checkTCPPort("proxy:8000", "127.0.0.1", "8000")
+	if !proxyItem.OK {
+		proxyItem.Skipped = true
+		proxyItem.Detail = "未监听（Spoke 节点可不使用蓝绿代理，非必检项）"
+	}
+	items = append(items, proxyItem)
+	return items
+}
+
+func checkSpokeHubConnection() CheckItem {
+	item := CheckItem{Name: "hub:连接"}
+	aiCfg, err := agent.LoadAIConfig()
+	if err != nil || aiCfg.Provider != "hub" || !aiCfg.IsConfigured() {
+		item.Detail = "未配置 Hub（请 /agent-config）"
+		return item
+	}
+	base := strings.TrimRight(aiCfg.BaseURL, "/")
+	url := base + "/__hub__/v1/register"
+	ok, detail := probeHubRegisterEndpoint(url)
+	if ok {
+		item.OK = true
+		item.Detail = base + " 可达"
+		return item
+	}
+	item.Detail = detail
+	return item
+}
+
 // RunHubChecks Hub 节点完整自检（含网关端口）
 func RunHubChecks() []CheckItem {
 	items := runEnvChecks(true)

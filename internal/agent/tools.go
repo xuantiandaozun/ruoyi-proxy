@@ -23,7 +23,7 @@ var AllTools = []ToolDef{
 	// ── 只读工具 ──────────────────────────────────────────────
 	{
 		Name:        "get_status",
-		Description: "查询所有服务的运行状态和代理状态",
+		Description: "查询服务运行状态。蓝绿代理未运行时也会尝试脚本 status、端口探测；非 Java 项目不会默认使用 /actuator/health",
 		ReadOnly:    true,
 		Parameters:  emptyParams(),
 	},
@@ -457,14 +457,13 @@ func (e *ToolExecutor) getStatus() (string, error) {
 	if proxyRunning {
 		sb.WriteString("代理服务: ✓ 运行中\n")
 	} else {
-		sb.WriteString("代理服务: ✗ 未运行\n")
+		sb.WriteString("代理服务: 未运行（若本机不使用蓝绿代理，可忽略此项）\n")
 	}
 	sb.WriteString(fmt.Sprintf("代理端口: %s\n\n", config.ProxyPort))
 
 	sb.WriteString(fmt.Sprintf("服务数量: %d\n", len(cfg.Services)))
 	sb.WriteString(strings.Repeat("-", 60) + "\n")
 
-	client := &http.Client{Timeout: 2 * time.Second}
 	for id, svc := range cfg.Services {
 		name := svc.Name
 		if name == "" {
@@ -479,23 +478,139 @@ func (e *ToolExecutor) getStatus() (string, error) {
 			mark = " [当前]"
 		}
 		sb.WriteString(fmt.Sprintf("\n服务: %s (%s)%s\n", name, id, mark))
-		sb.WriteString(fmt.Sprintf("  活跃环境: %s\n", svc.ActiveEnv))
-		sb.WriteString(fmt.Sprintf("  蓝色端口: %s → %s\n", extractPort(svc.BlueTarget), svc.BlueTarget))
-		sb.WriteString(fmt.Sprintf("  绿色端口: %s → %s\n", extractPort(svc.GreenTarget), svc.GreenTarget))
-
-		resp, err := client.Get(target + "/actuator/health")
-		if err != nil {
-			sb.WriteString("  健康状态: ✗ 不可达\n")
-		} else {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				sb.WriteString("  健康状态: ✓ 健康\n")
-			} else {
-				sb.WriteString(fmt.Sprintf("  健康状态: ⚠ HTTP %d\n", resp.StatusCode))
-			}
+		if svc.ProjectType != "" {
+			sb.WriteString(fmt.Sprintf("  项目类型: %s\n", svc.ProjectType))
 		}
+		if proxyRunning {
+			sb.WriteString(fmt.Sprintf("  活跃环境: %s\n", svc.ActiveEnv))
+			sb.WriteString(fmt.Sprintf("  蓝色端口: %s → %s\n", extractPort(svc.BlueTarget), svc.BlueTarget))
+			sb.WriteString(fmt.Sprintf("  绿色端口: %s → %s\n", extractPort(svc.GreenTarget), svc.GreenTarget))
+		} else {
+			sb.WriteString(fmt.Sprintf("  配置目标: %s\n", target))
+		}
+		sb.WriteString("  健康状态: " + e.checkServiceHealth(svc, target, proxyRunning) + "\n")
 	}
 	return sb.String(), nil
+}
+
+// checkServiceHealth 按项目类型与部署模式探测服务健康
+func (e *ToolExecutor) checkServiceHealth(svc *config.ServiceConfig, target string, proxyRunning bool) string {
+	// 优先尝试控制脚本 status
+	if scriptOut, ok := e.tryScriptStatus(svc); ok {
+		return scriptOut
+	}
+
+	projectType := strings.ToLower(strings.TrimSpace(svc.ProjectType))
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// Java 蓝绿模式：尝试 actuator，再回退 TCP
+	if projectType == "" || projectType == "java" {
+		if proxyRunning {
+			resp, err := client.Get(strings.TrimRight(target, "/") + "/actuator/health")
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 {
+					return "✓ 健康 (/actuator/health)"
+				}
+				return fmt.Sprintf("⚠ HTTP %d (/actuator/health)", resp.StatusCode)
+			}
+		}
+		if tcpOK := checkTargetTCP(target); tcpOK {
+			return "✓ 端口可达"
+		}
+		return "✗ 不可达（建议用 systemd/docker/实际业务端口进一步排查）"
+	}
+
+	// 非 Java：HTTP 根路径或 TCP
+	resp, err := client.Get(strings.TrimRight(target, "/") + "/")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+			return fmt.Sprintf("✓ HTTP %d", resp.StatusCode)
+		}
+		return fmt.Sprintf("⚠ HTTP %d", resp.StatusCode)
+	}
+	if checkTargetTCP(target) {
+		return "✓ 端口可达"
+	}
+	return "✗ 不可达（建议检查 systemd、docker 或实际监听端口）"
+}
+
+func (e *ToolExecutor) tryScriptStatus(svc *config.ServiceConfig) (string, bool) {
+	scriptPath := svc.ScriptPath
+	if scriptPath == "" {
+		scriptPath = e.execCtx.ScriptPath
+	}
+	if scriptPath == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(scriptPath) {
+		if abs, err := filepath.Abs(scriptPath); err == nil {
+			scriptPath = abs
+		}
+	}
+	if _, err := os.Stat(scriptPath); err != nil {
+		return "", false
+	}
+	env := buildScriptEnv(e.execCtx, svc)
+	cmd := exec.Command("bash", scriptPath, "status")
+	cmd.Env = env
+	out, err := runWithTimeout(cmd, 8*time.Second)
+	out = strings.TrimSpace(out)
+	if out == "" && err != nil {
+		return "", false
+	}
+	if err != nil {
+		if out != "" {
+			return "⚠ " + truncateLine(out, 200), true
+		}
+		return "", false
+	}
+	return truncateLine(out, 200), true
+}
+
+func checkTargetTCP(target string) bool {
+	host, port := parseHostPort(target)
+	if host == "" || port == "" {
+		return false
+	}
+	return isPortOpen(net.JoinHostPort(host, port))
+}
+
+func parseHostPort(target string) (host, port string) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		target = strings.TrimPrefix(strings.TrimPrefix(target, "http://"), "https://")
+	}
+	if idx := strings.Index(target, "/"); idx >= 0 {
+		target = target[:idx]
+	}
+	if strings.HasPrefix(target, "[") {
+		if end := strings.Index(target, "]"); end > 0 {
+			host = target[1:end]
+			rest := target[end+1:]
+			if strings.HasPrefix(rest, ":") {
+				port = strings.TrimPrefix(rest, ":")
+			}
+			return host, port
+		}
+	}
+	parts := strings.Split(target, ":")
+	if len(parts) == 1 {
+		return parts[0], "80"
+	}
+	return parts[0], parts[1]
+}
+
+func truncateLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 func (e *ToolExecutor) getLogs(logName, keyword string, lines int) (string, error) {

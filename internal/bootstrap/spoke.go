@@ -26,7 +26,7 @@ func RunSpokeCLI(io *CLIO) {
 			io.Print("\033[1;33m引导未完成: " + err.Error() + "\033[0m")
 		}
 	} else {
-		io.Print(FormatCheckReport("Spoke 节点环境自检", RunEnvChecks()))
+		io.Print(FormatCheckReport("Spoke 节点环境自检", RunSpokeChecks()))
 		// 已引导过仍尝试同步档案（例如 Hub 刚恢复）
 		if profile, err := loadLocalSpokeProfile(); err == nil {
 			_ = SyncProfileToHub(profile)
@@ -55,7 +55,7 @@ func RunSpokeOnboardingNow(io *CLIO) error {
 	if io == nil {
 		return fmt.Errorf("缺少交互回调")
 	}
-	io.Print(FormatCheckReport("Spoke 节点环境自检", RunEnvChecks()))
+	io.Print(FormatCheckReport("Spoke 节点环境自检", RunSpokeChecks()))
 	if err := runSpokeOnboarding(io); err != nil {
 		return err
 	}

@@ -83,7 +83,7 @@ func RunSelfCheck(io *CLIO) {
 		return
 	}
 	if shouldRunSpokeBootstrap() {
-		io.Print(FormatCheckReport("Spoke 节点环境自检", RunEnvChecks()))
+		io.Print(FormatCheckReport("Spoke 节点环境自检", RunSpokeChecks()))
 		return
 	}
 	io.Print(FormatCheckReport("环境自检", RunEnvChecks()))

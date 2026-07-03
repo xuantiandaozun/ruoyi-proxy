@@ -462,11 +462,22 @@ User (natural language / slash commands) → AI Agent (reasoning engine) → Too
                           LLM API (Claude / OpenAI / Hub relay / local model)
 ```
 
-The Agent understands the real server architecture:
+The Agent adapts to each node's role and actual environment — **it does not assume** every server runs blue-green proxy:
+
+| Scenario | Agent behavior |
+|----------|----------------|
+| **Blue-green mode** | Proxy on :8000 or user confirms → use deploy/switch/proxy-status |
+| **General ops mode** | Node/Python/Docker/single-instance → probe processes/ports/containers/systemd first |
+| **Hub node** | Gateway duties (tokens, Spoke list, AI relay) separate from local service ops |
+| **Spoke node** | Often AI ops CLI only; proxy not running ≠ failure; asks user when unsure |
+
+Typical blue-green stack (**only when this server uses it**):
 
 ```
 External request → Nginx(:80/:443) → Ruoyi Proxy(:8000) → Java apps(:8080/:8081)
 ```
+
+For non-standard projects, the Agent detects project type and can adapt custom `service-*.sh` control scripts.
 
 ### Quick Start
 
@@ -549,10 +560,14 @@ The Agent can call these tools automatically:
 
 `.conf` `.cfg` `.json` `.yaml` `.yml` `.xml` `.properties` `.env` `.ini` `.toml` `.sh` `.pem` `.crt` `.key`
 
-#### ⚙️ System Management
+#### ⚙️ System & Services
 
 | Tool | Description | Confirmation required |
 |------|-------------|:--------------------:|
+| `get_status` | Service status (adaptive health checks by project type; proxy down is not auto-failure) | ❌ |
+| `get_config` | View proxy and service config | ❌ |
+| `get_logs` | Read service logs | ❌ |
+| `get_system_info` | CPU / memory / disk info | ❌ |
 | `run_shell` | Execute a shell command | ✅ (read-only cmds skipped) |
 | `install_package` | Install packages (auto-detects distro) | ✅ |
 | `manage_systemd` | Manage systemd services | ✅ |
@@ -581,6 +596,16 @@ Write operations display a confirmation box:
 
 **Pre-authorization**: If your message itself is a clear affirmative ("yes", "ok", "confirm", "go ahead", etc.), the confirmation box is skipped entirely.
 
+### Environment Self-Check (`/self-check`)
+
+| Node | Scope |
+|------|-------|
+| **Hub** | Base env, :8000/:8001 gateway, AI config, `/__hub__/` Nginx route |
+| **Spoke** | Base env, Hub connectivity; :8000 proxy skipped if not listening (optional) |
+| **Default** | Base env; full service health checks done by Agent based on deployment mode |
+
+On Spoke or non-blue-green servers, ask naturally e.g. "self-check this server" — the Agent judges whether blue-green proxy applies, then uses systemd/docker/port probes as appropriate.
+
 ### Usage Examples
 
 ```bash
@@ -596,8 +621,11 @@ Write operations display a confirmation box:
 # Install software
 🤖 You: Install vim and htop
 
-# Deployment
+# Deployment (blue-green mode)
 🤖 You: Check the health of both blue and green environments, then switch traffic to the healthy one
+
+# General ops (non-blue-green project)
+🤖 You: Self-check this server and tell me what services are actually running
 ```
 
 ### Auto-Resume
@@ -667,6 +695,8 @@ Spoke package embeds Hub URL only — no API key.
 | `/hub/revoke` | 8001 (mgmt) | Revoke Spoke |
 
 > Hub requires Nginx `location ^~ /__hub__/` routing to the proxy port. Use `/self-check` or `/fix-nginx-hub` for diagnostics and AI-assisted fixes.
+>
+> **Note**: Hub and Spoke business servers may not use blue-green proxy. Spokes often run ruoyi-proxy as an AI ops CLI only. The Agent reads `spoke_profile.json` (Spoke) or `/hub-status` profiles (Hub) for project type, and self-checks adapt to the real environment — it does not default to proxy-status or `/actuator/health`.
 
 ---
 
