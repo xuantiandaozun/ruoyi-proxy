@@ -8,7 +8,7 @@
 
 一个功能完整的蓝绿部署代理服务器，支持零停机部署、HTTPS自动配置、多服务管理、文件同步和 AI 智能运维。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [Hub AI 网关](#-hub-ai-网关) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
 
 **[🇺🇸 English Documentation](README.md)**
 
@@ -24,6 +24,7 @@
 - [配置说明](#-配置说明)
 - [使用指南](#-使用指南)
 - [AI Agent 模式](#-ai-agent-模式)
+- [Hub AI 网关](#-hub-ai-网关)
 - [部署流程](#-部署流程)
 - [常见问题](#-常见问题)
 - [架构设计](#-架构设计)
@@ -70,11 +71,23 @@
 - **跨平台编译** - 支持 Windows 编译 Linux 版本
 
 ### 🤖 AI Agent 智能运维
+- **默认入口** - `cli` 启动后直接进入 AI Agent 对话，运维命令用 `/xxx` 斜杠命令调用
 - **自然语言运维** - 用中文描述任务，AI 自动规划并执行
 - **多 LLM 支持** - 兼容 Anthropic Claude、OpenAI 及任意兼容 API（DeepSeek、Qwen、Ollama 等）
+- **会话管理** - 多会话持久化，支持 `/sessions`、`/load`、`/new` 切换历史对话
 - **文件管理** - 读取、修改、删除服务器文件，重要文件自动备份
 - **服务管理** - 安装软件包、管理 systemd 服务、执行 Shell 命令
 - **安全确认** - 写操作前展示确认框，同一轮操作只需确认一次
+
+### 🌐 Hub AI 网关（多服务器）
+- **集中密钥** - Hub 节点持有 AI API Key，多台 Spoke 服务器无需各自配置密钥
+- **Token 注册** - Hub 生成一次性注册 Token，Spoke 通过 `/agent-config` 完成注册
+- **本地执行** - AI 推理经 Hub 转发，工具调用仍在 Spoke 本机执行
+- **预编译包** - `make linux-hub` / `make linux-spoke` 分别打包 Hub 与 Spoke 节点
+
+### 💾 低内存部署
+- **内存友好** - `/deploy-lowmem` 先停止旧服务再启动新版本，无需同时运行蓝绿双环境
+- **适用场景** - 小内存 VPS（如 1G/2G）无法做标准蓝绿部署时使用
 
 ---
 
@@ -105,11 +118,11 @@ ssh user@server
 cd /opt/ruoyi-proxy
 chmod +x ruoyi-proxy-linux
 
-# 4. 启动交互式 CLI
+# 4. 启动 CLI（默认进入 AI Agent 模式）
 ./ruoyi-proxy-linux cli
 
 # 5. 执行初始化向导
-ruoyi> init
+/init
 ```
 
 初始化向导会引导你完成以下配置：
@@ -144,18 +157,25 @@ make cli
 
 ### 快速测试
 
-#### 使用交互式 CLI（推荐）
+#### 使用 AI Agent CLI（推荐）
 
 ```bash
-# 启动 CLI
+# 启动 CLI（默认进入 Agent 模式）
 ./bin/ruoyi-proxy cli
 
-# 常用命令
-ruoyi> status      # 查看服务状态
-ruoyi> deploy      # 执行蓝绿部署
-ruoyi> switch      # 切换环境
-ruoyi> logs        # 查看日志
-ruoyi> help        # 查看所有命令
+# 斜杠命令（运维）
+/status            # 查看服务状态
+/deploy            # 蓝绿部署
+/deploy-lowmem     # 低内存部署
+/switch            # 切换环境
+/logs              # 查看日志
+/help              # 查看说明
+/commands          # 命令列表
+/exit              # 退出
+
+# 自然语言（需先 /agent-config 配置 AI）
+查看 nginx 是否正常运行
+帮我把流量切到绿色环境
 ```
 
 #### 使用 HTTP API
@@ -178,33 +198,29 @@ curl http://localhost:8001/health
 ```
 ruoyi-proxy/
 ├── cmd/
-│   └── proxy/          # 程序入口
+│   ├── proxy/          # 程序入口
+│   └── prepare-embed/  # Hub/Spoke 打包前配置嵌入
 ├── internal/
-│   ├── agent/          # AI Agent 运维模块
-│   │   ├── agent.go    # ReAct 推理引擎
-│   │   ├── tools.go    # 工具集（文件/服务/Shell）
-│   │   ├── openai.go   # OpenAI 兼容 API 适配器
-│   │   └── anthropic.go# Anthropic API 适配器
-│   ├── cli/            # 交互式 CLI
+│   ├── agent/          # AI Agent 运维模块（ReAct 引擎、工具、LLM 适配）
+│   ├── cli/            # 交互式 CLI（Agent 为主入口）
 │   ├── config/         # 配置管理
-│   ├── handler/        # HTTP 处理器
+│   ├── hub/            # Hub AI 网关（注册、转发、Spoke 管理）
 │   ├── proxy/          # 反向代理核心
-│   └── sync/           # 文件同步
-├── configs/            # 配置文件目录
-│   ├── app_config.json           # 应用配置
-│   ├── proxy_config.json         # 代理配置
+│   ├── handler/        # （规划中，暂无代码）
+│   └── sync/           # （规划中，暂无代码）
+├── configs/            # 配置模板与示例
+│   ├── app_config.example.json   # 应用配置示例（含 ai、hub、jvm）
 │   ├── nginx.conf.template       # Nginx HTTP 模板
 │   └── nginx-https.conf.template # Nginx HTTPS 模板
-├── scripts/            # Shell 脚本（会被嵌入）
+├── scripts/            # Shell 脚本（编译时嵌入二进制）
 │   ├── init.sh         # 初始化脚本
-│   ├── service.sh      # 服务管理
+│   ├── service.sh      # 服务管理（含 deploy-lowmem）
 │   ├── https.sh        # HTTPS 管理
-│   ├── deploy.sh       # 部署脚本
-│   └── sync.sh         # 文件同步
+│   └── deploy.sh       # 部署脚本
 ├── bin/                # 编译输出目录
 ├── Makefile            # Make 构建脚本
 ├── build.bat           # Windows 构建脚本
-├── go.mod              # Go 模块定义
+├── AGENTS.md           # AI 编码助手开发指南
 └── README.md           # 项目文档
 ```
 
@@ -214,31 +230,45 @@ ruoyi-proxy/
 
 ### 应用配置 (configs/app_config.json)
 
+运行时生成，可参考 `configs/app_config.example.json`：
+
 ```json
 {
   "domain": "api.example.com",
   "enable_https": false,
-  "email": "admin@example.com",
+  "hub": {
+    "enabled": false
+  },
+  "ai": {
+    "provider": "openai",
+    "api_key": "sk-your-key-here",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "max_tokens": 4096,
+    "context_limit": 24000,
+    "timeout_seconds": 120
+  },
   "proxy": {
-    "proxy_port": ":8000",
-    "mgmt_port": ":8001",
-    "blue_port": ":8080",
-    "green_port": ":8081"
+    "blue_target": "http://127.0.0.1:8080",
+    "green_target": "http://127.0.0.1:8081",
+    "active_env": "blue",
+    "proxy_port": "8000"
+  },
+  "ssl": {
+    "email": "admin@example.com",
+    "cert_path": "/etc/nginx/cert"
   },
   "nginx": {
     "config_path": "/etc/nginx/conf.d/ruoyi.conf",
-    "cert_path": "/etc/nginx/cert",
     "html_path": "/etc/nginx/html"
   },
-  "sync": {
-    "enabled": false,
-    "role": "master",
-    "remote_host": "",
-    "remote_user": "",
-    "remote_path": ""
+  "jvm": {
+    "preset": 2
   }
 }
 ```
+
+> AI 配置保存在 `configs/app_config.json` 的 `ai` 字段，通过 `/agent-config` 交互式修改。
 
 ### 代理配置 (configs/proxy_config.json)
 
@@ -258,71 +288,82 @@ ruoyi-proxy/
 
 **Windows 用户：**
 ```cmd
-build.bat               # 编译 Linux 版本（推荐）
+build.bat                    # 编译 Linux 标准包
+build.bat linux-hub          # 编译 Hub 包（需先在 configs/app_config.json 写好 AI 配置）
+set HUB_URL=https://hub.example.com && build.bat linux-spoke   # 编译 Spoke 包
 ```
 
 **Linux/Mac 用户：**
 ```bash
 make build              # 编译当前平台
-make linux              # 编译 Linux 版本
-make run                # 开发模式运行
-make cli                # 启动交互式 CLI
+make linux              # 编译 Linux 标准包
+make linux-hub          # Hub 包：嵌入 AI 配置 + hub.enabled=true
+make linux-spoke HUB_URL=https://hub.example.com  # Spoke 包：嵌入 Hub 地址，不含密钥
+make run                # 开发模式运行代理
+make cli                # 启动 CLI（Agent 模式）
 make install            # 安装依赖
 make clean              # 清理编译文件
 ```
 
-> 💡 **提示**：修改 `scripts/` 目录下的脚本后，必须重新编译才能生效。
+> 💡 **Hub/Spoke 打包**：打包前在 `configs/app_config.json` 写好 AI 配置（Hub）或设置 `HUB_URL`（Spoke）。Hub 包部署后可直接对话；Spoke 包首次运行用 `/agent-config` 填一次性注册 Token。
 
-### 交互式 CLI 命令
+> 💡 **提示**：修改 `scripts/` 或 `configs/` 目录后，必须重新编译才能生效（脚本与配置在编译时嵌入二进制）。
+
+### Agent 斜杠命令
+
+`make cli` 或 `./ruoyi-proxy-linux cli` 启动后**默认进入 AI Agent 模式**。运维命令以 `/xxx` 形式调用；输入 `/` 可打开命令菜单（↑/↓ 选择）。
 
 ```bash
+# 会话管理
+/sessions          # 查看历史会话
+/load <id>         # 加载历史会话
+/new               # 新建会话
+/current           # 当前会话信息
+
 # 服务管理
-ruoyi> start           # 启动 Java 应用
-ruoyi> stop            # 停止 Java 应用
-ruoyi> restart         # 重启 Java 应用
-ruoyi> status          # 查看服务状态
-ruoyi> detail          # 详细状态（含健康检查）
+/start             # 启动 Java 应用
+/stop              # 停止 Java 应用
+/restart           # 重启 Java 应用
+/status            # 查看服务状态
+/detail            # 详细状态（含健康检查）
+/logs              # 查看日志
+/logs-follow       # 实时日志
 
 # 蓝绿部署
-ruoyi> deploy          # 执行蓝绿部署
-ruoyi> switch          # 交互式切换环境
-ruoyi> rollback        # 回滚到上一个环境
+/deploy            # 标准蓝绿部署（双环境并行）
+/deploy-lowmem     # 低内存部署（先停旧再启新）
+/switch            # 切换蓝绿环境
 
 # 代理服务
-ruoyi> proxy-start     # 启动代理服务
-ruoyi> proxy-stop      # 停止代理服务
-ruoyi> proxy-status    # 查看代理状态
+/proxy-start       # 启动代理服务
+/proxy-stop        # 停止代理服务
+/proxy-status      # 查看代理状态
 
 # 多服务管理
-ruoyi> service-add     # 添加新服务
-ruoyi> service-list    # 查看服务列表
-ruoyi> service-switch  # 切换当前服务
-ruoyi> service-remove  # 删除服务
+/service-list      # 查看服务列表
+/service-switch    # 切换当前服务
 
-# HTTPS 管理
-ruoyi> cert <域名>     # 申请 SSL 证书
-ruoyi> enable-https    # 开启 HTTPS
-ruoyi> disable-https   # 关闭 HTTPS
+# AI 与 Hub
+/agent-config      # 配置 AI 提供商 / Spoke 注册
+/hub-token         # （Hub）生成 Spoke 注册 Token
+/hub-status        # （Hub）查看 Spoke 列表
+/hub-spoke <id>    # （Hub）查看单个 Spoke
+/hub-enable        # 启用 Hub 网关（需重启代理）
+/hub-disable       # 禁用 Hub 网关
+/hub-revoke <id>   # （Hub）吊销 Spoke
+/self-check        # 运行环境自检
+/fix-nginx-hub     # 让 AI 修复 Nginx Hub 路由
 
-# 配置管理
-ruoyi> config          # 查看完整配置
-ruoyi> config-edit     # 编辑配置
-
-# 文件同步
-ruoyi> sync-config     # 配置文件同步
-ruoyi> sync-status     # 查看同步状态
-
-# AI Agent
-ruoyi> agent           # 进入 AI 对话模式
-ruoyi> agent-config    # 配置 AI 提供商和模型
-
-# 系统管理
-ruoyi> init            # 完整初始化
-ruoyi> logs            # 查看日志
-ruoyi> monitor         # 实时监控
-ruoyi> help            # 查看所有命令
-ruoyi> exit            # 退出 CLI
+# 配置与系统
+/config            # 查看完整配置
+/init              # 完整初始化向导
+/help              # 查看说明
+/commands          # 命令列表
+/cls               # 清屏
+/exit              # 退出
 ```
+
+> 未配置 AI 时，斜杠运维命令仍可直接使用；配置 AI 后还可自然语言描述需求。
 
 ### 管理 API
 
@@ -370,8 +411,8 @@ curl -X POST http://localhost:8001/config \
 #### 申请 SSL 证书
 
 ```bash
-# 在 CLI 中申请证书（域名需已解析到服务器）
-ruoyi> cert example.com
+# 在 Agent 中申请证书（域名需已解析到服务器）
+/cert example.com
 ```
 
 证书会自动保存到 `/etc/nginx/cert/` 目录。
@@ -379,7 +420,7 @@ ruoyi> cert example.com
 #### 开启 HTTPS
 
 ```bash
-ruoyi> enable-https
+/enable-https
 ```
 
 **自动完成的操作：**
@@ -392,7 +433,7 @@ ruoyi> enable-https
 #### 关闭 HTTPS
 
 ```bash
-ruoyi> disable-https
+/disable-https
 ```
 
 #### 证书续期
@@ -400,10 +441,8 @@ ruoyi> disable-https
 Let's Encrypt 证书有效期为 90 天，可以手动续期：
 
 ```bash
-ruoyi> cert example.com
+/cert example.com
 ```
-
-或配置自动续期（crontab）：
 
 ```bash
 # 每月 1 号凌晨 2 点自动续期
@@ -414,14 +453,14 @@ ruoyi> cert example.com
 
 ## 🤖 AI Agent 模式
 
-AI Agent 模式让你用自然语言与服务器交互，无需记忆复杂命令。Agent 内置 ReAct（Reason + Act）推理引擎，会自动规划步骤、调用工具、观察结果，直到完成任务。
+`cli` 启动后**默认进入 AI Agent 模式**，无需再输入 `agent` 命令。Agent 内置 ReAct（Reason + Act）推理引擎，会自动规划步骤、调用工具、观察结果，直到完成任务。
 
 ### 架构总览
 
 ```
-用户（自然语言） → AI Agent（推理引擎）→ 工具调用 → 服务器操作
-                         ↑
-                  LLM API（Claude / OpenAI / 本地模型）
+用户（自然语言 / 斜杠命令） → AI Agent（推理引擎）→ 工具调用 → 服务器操作
+                                    ↑
+                          LLM API（Claude / OpenAI / Hub 转发 / 本地模型）
 ```
 
 Agent 了解当前服务器的真实架构：
@@ -433,27 +472,31 @@ Agent 了解当前服务器的真实架构：
 ### 快速开始
 
 ```bash
-# 第一步：配置 AI 提供商
-ruoyi> agent-config
+# 启动 CLI（直接进入 Agent）
+./ruoyi-proxy-linux cli
 
-# 第二步：进入 Agent 模式
-ruoyi> agent
+# 配置 AI 提供商（首次使用）
+/agent-config
 
-# 开始对话
-🤖 你: 查看一下 nginx 配置文件
-🤖 你: 帮我把 /etc/nginx/conf.d/default.conf 的超时时间改成 60s
-🤖 你: 安装 htop 并检查当前系统负载
+# 自然语言对话
+You: 查看一下 nginx 配置文件
+You: 帮我把 /etc/nginx/conf.d/default.conf 的超时时间改成 60s
+You: 安装 htop 并检查当前系统负载
+
+# 或用斜杠命令
+/status
+/deploy
 ```
 
 ### 配置 AI 提供商
 
-执行 `agent-config` 后，按提示填写以下信息：
+执行 `/agent-config` 后，按提示填写以下信息：
 
 | 参数 | 说明 | 示例 |
 |------|------|------|
-| **provider** | LLM 提供商类型 | `anthropic` / `openai` |
-| **api_key** | API 密钥 | `sk-...` |
-| **base_url** | API 地址（可选） | `https://api.deepseek.com` |
+| **provider** | LLM 提供商类型 | `anthropic` / `openai` / `hub` |
+| **api_key** | API 密钥（Hub 模式无需填写） | `sk-...` |
+| **base_url** | API 地址（Hub 模式填 Hub 地址） | `https://api.deepseek.com` |
 | **model** | 使用的模型 | `claude-opus-4-5` |
 | **max_tokens** | 最大输出 Token | `8096` |
 | **timeout** | 请求超时（秒） | `120` |
@@ -468,12 +511,12 @@ model:     claude-opus-4-5
 
 # OpenAI
 provider:  openai
-base_url:  https://api.openai.com
+base_url:  https://api.openai.com/v1
 model:     gpt-4o
 
 # DeepSeek（OpenAI 兼容）
 provider:  openai
-base_url:  https://api.deepseek.com
+base_url:  https://api.deepseek.com/v1
 model:     deepseek-chat
 
 # Ollama 本地模型
@@ -481,9 +524,14 @@ provider:  openai
 base_url:  http://localhost:11434/v1
 model:     qwen2.5:14b
 api_key:   ollama
+
+# Hub 模式（Spoke 节点）
+provider:  hub
+base_url:  https://your-hub.example.com
+# 首次运行填入 Hub 上 /hub-token 生成的一次性注册 Token
 ```
 
-配置保存在 `~/.ruoyi-agent.json`，下次启动自动加载。
+配置保存在 `configs/app_config.json` 的 `ai` 字段，下次启动自动加载。
 
 ### 内置工具列表
 
@@ -560,6 +608,70 @@ Agent 可以调用以下工具（无需手动操作）：
 
 ---
 
+## 🌐 Hub AI 网关
+
+多台服务器运维时，可用 Hub/Spoke 架构集中管理 AI 密钥：Hub 持有 API Key 并转发 AI 请求，Spoke 在本机执行工具，无需每台服务器各自配置密钥。
+
+### 架构
+
+```
+Spoke 服务器 A ──┐
+Spoke 服务器 B ──┼──► Hub（集中 AI 密钥）──► LLM API
+Spoke 服务器 C ──┘         ▲
+                           │
+                    工具仍在 Spoke 本地执行
+```
+
+### 部署步骤
+
+**1. 打包 Hub 节点**
+
+```bash
+# 本地写好 configs/app_config.json 中的 ai 段（含 api_key）
+make linux-hub
+# 输出: bin/ruoyi-proxy-linux-hub
+```
+
+Hub 包已嵌入 AI 配置且 `hub.enabled=true`，部署后可直接 `/agent-config` 对话。
+
+**2. 打包 Spoke 节点**
+
+```bash
+make linux-spoke HUB_URL=https://your-hub.example.com
+# 输出: bin/ruoyi-proxy-linux-spoke
+```
+
+Spoke 包只嵌入 Hub 地址，不含 API Key。
+
+**3. Hub 上生成注册 Token**
+
+```bash
+/hub-token
+# 或通过管理 API: curl http://localhost:8001/hub/token
+```
+
+**4. Spoke 上注册**
+
+```bash
+/agent-config
+# 选择 provider=hub，填入 Hub 地址与一次性 Token
+```
+
+### API 端点
+
+| 端点 | 端口 | 说明 |
+|------|------|------|
+| `/__hub__/v1/token` | 8000（代理） | 生成一次性注册 Token |
+| `/__hub__/v1/register` | 8000（代理） | Spoke 注册 |
+| `/__hub__/v1/chat` | 8000（代理） | AI 聊天转发（v1 非流式） |
+| `/hub/token` | 8001（管理） | 管理端生成 Token |
+| `/hub/status` | 8001（管理） | Spoke 列表 |
+| `/hub/revoke` | 8001（管理） | 吊销 Spoke |
+
+> Hub 需在 Nginx 配置 `location ^~ /__hub__/` 转发到代理端口；可用 `/self-check` 自检，或用 `/fix-nginx-hub` 让 AI 辅助修复。
+
+---
+
 ## 🔄 部署流程
 
 ### 蓝绿部署流程
@@ -593,17 +705,19 @@ Agent 可以调用以下工具（无需手动操作）：
 ### 使用 CLI 执行部署
 
 ```bash
-# 启动 CLI
+# 启动 CLI（Agent 模式）
 ./ruoyi-proxy-linux cli
 
-# 执行部署（自动化整个流程）
-ruoyi> deploy
+# 标准蓝绿部署（双环境并行，零停机）
+/deploy
 
-# 或手动控制每一步
-ruoyi> status          # 查看当前状态
-ruoyi> switch green    # 切换到绿色环境
-ruoyi> status          # 验证切换结果
-ruoyi> switch blue     # 如需回滚
+# 低内存部署（先停旧再启新，适合小内存机器）
+/deploy-lowmem
+
+# 或手动控制
+/status          # 查看当前状态
+/switch          # 切换环境
+/status          # 验证切换结果
 ```
 
 ### 生产部署建议
@@ -648,7 +762,7 @@ tail -f /var/log/ruoyi-proxy.log
 netstat -tlnp | grep 8000
 
 # 修改配置文件中的端口
-ruoyi> config-edit
+/config
 ```
 
 ### 配置文件不生效
@@ -659,7 +773,7 @@ ruoyi> config-edit
 ```bash
 # 删除旧配置，重新初始化
 rm configs/*.json
-ruoyi> init
+/init
 ```
 
 ### 编译失败
@@ -676,7 +790,7 @@ make build
 
 ### 代理服务无法启动
 
-**问题**：执行 `proxy-start` 失败
+**问题**：执行 `/proxy-start` 失败
 
 **解决方案**：
 ```bash
@@ -687,7 +801,7 @@ make build
 netstat -tlnp | grep 8001
 
 # 查看详细日志
-ruoyi> logs
+/logs
 ```
 
 ### HTTPS 证书申请失败
@@ -738,9 +852,8 @@ ruoyi> logs
 | **cmd/proxy** | 程序入口 | 启动各个服务，初始化配置 |
 | **internal/config** | 配置管理 | 加载、保存、验证配置文件 |
 | **internal/proxy** | 反向代理 | 核心代理逻辑，蓝绿切换 |
-| **internal/handler** | HTTP 处理 | 管理 API 接口处理 |
-| **internal/cli** | CLI 管理 | 交互式命令行界面 |
-| **internal/sync** | 文件同步 | 主从服务器文件同步 |
+| **internal/hub** | Hub 网关 | Spoke 注册、AI 请求转发、Token 管理 |
+| **internal/cli** | CLI 管理 | Agent 为主入口，斜杠命令调度 |
 | **internal/agent** | AI 运维 | ReAct 引擎、工具集、LLM 适配器 |
 
 ### 数据流

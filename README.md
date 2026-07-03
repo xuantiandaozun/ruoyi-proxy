@@ -8,7 +8,7 @@
 
 A full-featured blue-green deployment proxy server with zero-downtime deployments, automatic HTTPS, multi-service management, file synchronization, and AI-powered operations.
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Usage Guide](#-usage-guide) • [AI Agent Mode](#-ai-agent-mode) • [Architecture](#-architecture) • [Contributing](#-contributing)
+[Features](#-features) • [Quick Start](#-quick-start) • [Usage Guide](#-usage-guide) • [AI Agent Mode](#-ai-agent-mode) • [Hub AI Gateway](#-hub-ai-gateway) • [Architecture](#-architecture) • [Contributing](#-contributing)
 
 **[🇨🇳 中文文档](README_CN.md)**
 
@@ -24,6 +24,7 @@ A full-featured blue-green deployment proxy server with zero-downtime deployment
 - [Configuration](#-configuration)
 - [Usage Guide](#-usage-guide)
 - [AI Agent Mode](#-ai-agent-mode)
+- [Hub AI Gateway](#-hub-ai-gateway)
 - [Deployment Workflow](#-deployment-workflow)
 - [Troubleshooting](#-troubleshooting)
 - [Architecture](#-architecture)
@@ -70,11 +71,23 @@ A full-featured blue-green deployment proxy server with zero-downtime deployment
 - **Cross-platform build** - Compile Linux binaries from Windows
 
 ### 🤖 AI Agent Operations
+- **Default entry** - `cli` launches directly into AI Agent mode; ops commands use `/xxx` slash syntax
 - **Natural language** - Describe tasks in plain English; AI plans and executes them
 - **Multi-LLM support** - Works with Anthropic Claude, OpenAI, and any compatible API (DeepSeek, Qwen, Ollama, etc.)
+- **Session management** - Persistent multi-session history with `/sessions`, `/load`, `/new`
 - **File management** - Read, modify, and delete server files with automatic backup for important files
 - **Service management** - Install packages, manage systemd services, run shell commands
 - **Safe confirmation** - Write operations require confirmation; one approval covers an entire turn
+
+### 🌐 Hub AI Gateway (Multi-Server)
+- **Centralized keys** - Hub holds the AI API key; Spoke servers never need their own secrets
+- **Token registration** - Hub generates one-time registration tokens; Spokes register via `/agent-config`
+- **Local execution** - AI inference goes through Hub; tool calls still run on the Spoke machine
+- **Pre-built packages** - `make linux-hub` / `make linux-spoke` for Hub and Spoke nodes
+
+### 💾 Low-Memory Deployment
+- **Memory-friendly** - `/deploy-lowmem` stops the old service before starting the new one
+- **Use case** - Small VPS instances (1G/2G RAM) that cannot run blue and green simultaneously
 
 ---
 
@@ -105,11 +118,11 @@ ssh user@server
 cd /opt/ruoyi-proxy
 chmod +x ruoyi-proxy-linux
 
-# 4. Start the interactive CLI
+# 4. Start CLI (defaults to AI Agent mode)
 ./ruoyi-proxy-linux cli
 
 # 5. Run the initialization wizard
-ruoyi> init
+/init
 ```
 
 The init wizard will guide you through:
@@ -144,16 +157,25 @@ make cli
 
 ### Quick Test
 
-#### Using the interactive CLI (recommended)
+#### Using the AI Agent CLI (recommended)
 
 ```bash
+# Start CLI (Agent mode by default)
 ./bin/ruoyi-proxy cli
 
-ruoyi> status      # View service status
-ruoyi> deploy      # Run blue-green deployment
-ruoyi> switch      # Switch environments
-ruoyi> logs        # View logs
-ruoyi> help        # Show all commands
+# Slash commands (operations)
+/status            # View service status
+/deploy            # Blue-green deployment
+/deploy-lowmem     # Low-memory deployment
+/switch            # Switch environments
+/logs              # View logs
+/help              # Show help
+/commands          # Command list
+/exit              # Exit
+
+# Natural language (requires /agent-config first)
+Check if nginx is running properly
+Switch traffic to the green environment
 ```
 
 #### Using the HTTP API
@@ -176,33 +198,29 @@ curl http://localhost:8001/health
 ```
 ruoyi-proxy/
 ├── cmd/
-│   └── proxy/          # Program entry point
+│   ├── proxy/          # Program entry point
+│   └── prepare-embed/  # Hub/Spoke embed config before build
 ├── internal/
-│   ├── agent/          # AI Agent operations module
-│   │   ├── agent.go    # ReAct reasoning engine
-│   │   ├── tools.go    # Tool set (file / service / shell)
-│   │   ├── openai.go   # OpenAI-compatible API adapter
-│   │   └── anthropic.go# Anthropic API adapter
-│   ├── cli/            # Interactive CLI
+│   ├── agent/          # AI Agent module (ReAct engine, tools, LLM adapters)
+│   ├── cli/            # Interactive CLI (Agent-first entry)
 │   ├── config/         # Configuration management
-│   ├── handler/        # HTTP handlers
+│   ├── hub/            # Hub AI gateway (registration, forwarding, Spoke mgmt)
 │   ├── proxy/          # Reverse proxy core
-│   └── sync/           # File synchronization
-├── configs/            # Configuration files
-│   ├── app_config.json           # Application config
-│   ├── proxy_config.json         # Proxy config
+│   ├── handler/        # (planned, not yet implemented)
+│   └── sync/           # (planned, not yet implemented)
+├── configs/            # Config templates and examples
+│   ├── app_config.example.json   # App config example (ai, hub, jvm)
 │   ├── nginx.conf.template       # Nginx HTTP template
 │   └── nginx-https.conf.template # Nginx HTTPS template
-├── scripts/            # Shell scripts (embedded in binary)
+├── scripts/            # Shell scripts (embedded at build time)
 │   ├── init.sh         # Initialization script
-│   ├── service.sh      # Service management
+│   ├── service.sh      # Service management (includes deploy-lowmem)
 │   ├── https.sh        # HTTPS management
-│   ├── deploy.sh       # Deployment script
-│   └── sync.sh         # File synchronization
+│   └── deploy.sh       # Deployment script
 ├── bin/                # Build output directory
 ├── Makefile            # Make build script
 ├── build.bat           # Windows build script
-├── go.mod              # Go module definition
+├── AGENTS.md           # AI coding agent guidelines
 └── README.md           # Project documentation
 ```
 
@@ -212,31 +230,45 @@ ruoyi-proxy/
 
 ### Application Config (configs/app_config.json)
 
+Generated at runtime; see `configs/app_config.example.json` for reference:
+
 ```json
 {
   "domain": "api.example.com",
   "enable_https": false,
-  "email": "admin@example.com",
+  "hub": {
+    "enabled": false
+  },
+  "ai": {
+    "provider": "openai",
+    "api_key": "sk-your-key-here",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "max_tokens": 4096,
+    "context_limit": 24000,
+    "timeout_seconds": 120
+  },
   "proxy": {
-    "proxy_port": ":8000",
-    "mgmt_port": ":8001",
-    "blue_port": ":8080",
-    "green_port": ":8081"
+    "blue_target": "http://127.0.0.1:8080",
+    "green_target": "http://127.0.0.1:8081",
+    "active_env": "blue",
+    "proxy_port": "8000"
+  },
+  "ssl": {
+    "email": "admin@example.com",
+    "cert_path": "/etc/nginx/cert"
   },
   "nginx": {
     "config_path": "/etc/nginx/conf.d/ruoyi.conf",
-    "cert_path": "/etc/nginx/cert",
     "html_path": "/etc/nginx/html"
   },
-  "sync": {
-    "enabled": false,
-    "role": "master",
-    "remote_host": "",
-    "remote_user": "",
-    "remote_path": ""
+  "jvm": {
+    "preset": 2
   }
 }
 ```
+
+> AI config is stored under the `ai` key in `configs/app_config.json` and edited via `/agent-config`.
 
 ### Proxy Config (configs/proxy_config.json)
 
@@ -256,71 +288,82 @@ ruoyi-proxy/
 
 **Windows:**
 ```cmd
-build.bat               # Build Linux binary (recommended)
+build.bat                    # Build standard Linux binary
+build.bat linux-hub          # Build Hub package (set AI config in configs/app_config.json first)
+set HUB_URL=https://hub.example.com && build.bat linux-spoke   # Build Spoke package
 ```
 
 **Linux/Mac:**
 ```bash
 make build              # Build for current platform
-make linux              # Build Linux binary
-make run                # Run in dev mode
-make cli                # Start interactive CLI
+make linux              # Build standard Linux binary
+make linux-hub          # Hub package: embeds AI config + hub.enabled=true
+make linux-spoke HUB_URL=https://hub.example.com  # Spoke package: embeds Hub URL, no API key
+make run                # Run proxy in dev mode
+make cli                # Start CLI (Agent mode)
 make install            # Install dependencies
 make clean              # Clean build artifacts
 ```
 
-> 💡 **Tip**: After modifying scripts in `scripts/`, you must rebuild for changes to take effect.
+> 💡 **Hub/Spoke builds**: Write AI config in `configs/app_config.json` before `linux-hub`, or set `HUB_URL` for `linux-spoke`. Hub deploys ready to chat; Spoke registers via `/agent-config` with a one-time token.
 
-### CLI Commands
+> 💡 **Tip**: After modifying `scripts/` or `configs/`, you must rebuild (files are embedded at compile time).
+
+### Agent Slash Commands
+
+`make cli` or `./ruoyi-proxy-linux cli` **defaults to AI Agent mode**. Ops commands use `/xxx` syntax; type `/` to open the command menu (↑/↓ to select).
 
 ```bash
+# Session management
+/sessions          # List saved sessions
+/load <id>         # Load a session
+/new               # New session
+/current           # Current session info
+
 # Service management
-ruoyi> start           # Start Java application
-ruoyi> stop            # Stop Java application
-ruoyi> restart         # Restart Java application
-ruoyi> status          # View service status
-ruoyi> detail          # Detailed status (includes health check)
+/start             # Start Java application
+/stop              # Stop Java application
+/restart           # Restart Java application
+/status            # View service status
+/detail            # Detailed status (with health check)
+/logs              # View logs
+/logs-follow       # Follow logs in real time
 
 # Blue-green deployment
-ruoyi> deploy          # Run blue-green deployment
-ruoyi> switch          # Interactive environment switch
-ruoyi> rollback        # Roll back to previous environment
+/deploy            # Standard blue-green (both envs running)
+/deploy-lowmem     # Low-memory deploy (stop old, start new)
+/switch            # Switch blue/green environment
 
 # Proxy service
-ruoyi> proxy-start     # Start proxy service
-ruoyi> proxy-stop      # Stop proxy service
-ruoyi> proxy-status    # View proxy status
+/proxy-start       # Start proxy service
+/proxy-stop        # Stop proxy service
+/proxy-status      # View proxy status
 
 # Multi-service management
-ruoyi> service-add     # Add a new service
-ruoyi> service-list    # List all services
-ruoyi> service-switch  # Switch active service
-ruoyi> service-remove  # Remove a service
+/service-list      # List all services
+/service-switch    # Switch active service
 
-# HTTPS management
-ruoyi> cert <domain>   # Request SSL certificate
-ruoyi> enable-https    # Enable HTTPS
-ruoyi> disable-https   # Disable HTTPS
+# AI & Hub
+/agent-config      # Configure AI provider / Spoke registration
+/hub-token         # (Hub) Generate Spoke registration token
+/hub-status        # (Hub) List Spokes
+/hub-spoke <id>    # (Hub) View a Spoke
+/hub-enable        # Enable Hub gateway (requires proxy restart)
+/hub-disable       # Disable Hub gateway
+/hub-revoke <id>   # (Hub) Revoke a Spoke
+/self-check        # Run environment self-check
+/fix-nginx-hub     # Ask AI to fix Nginx Hub routing
 
-# Configuration
-ruoyi> config          # View full configuration
-ruoyi> config-edit     # Edit configuration
-
-# File synchronization
-ruoyi> sync-config     # Configure file sync
-ruoyi> sync-status     # View sync status
-
-# AI Agent
-ruoyi> agent           # Enter AI conversation mode
-ruoyi> agent-config    # Configure AI provider and model
-
-# System
-ruoyi> init            # Full initialization wizard
-ruoyi> logs            # View logs
-ruoyi> monitor         # Real-time monitoring
-ruoyi> help            # Show all commands
-ruoyi> exit            # Exit CLI
+# Config & system
+/config            # View full configuration
+/init              # Full initialization wizard
+/help              # Show help
+/commands          # Command list
+/cls               # Clear screen
+/exit              # Exit
 ```
+
+> Slash ops commands work even without AI configured; add AI via `/agent-config` for natural language tasks.
 
 ### Management API
 
@@ -366,7 +409,7 @@ curl -X POST http://localhost:8001/config \
 
 ```bash
 # Domain must already point to this server
-ruoyi> cert example.com
+/cert example.com
 ```
 
 Certificates are saved to `/etc/nginx/cert/`.
@@ -374,7 +417,7 @@ Certificates are saved to `/etc/nginx/cert/`.
 #### Enable HTTPS
 
 ```bash
-ruoyi> enable-https
+/enable-https
 ```
 
 This automatically:
@@ -387,7 +430,7 @@ This automatically:
 #### Disable HTTPS
 
 ```bash
-ruoyi> disable-https
+/disable-https
 ```
 
 #### Certificate Renewal
@@ -395,7 +438,7 @@ ruoyi> disable-https
 Let's Encrypt certificates are valid for 90 days. Renew manually:
 
 ```bash
-ruoyi> cert example.com
+/cert example.com
 ```
 
 Or set up auto-renewal via crontab:
@@ -409,14 +452,14 @@ Or set up auto-renewal via crontab:
 
 ## 🤖 AI Agent Mode
 
-AI Agent mode lets you interact with your server in plain English — no need to memorize commands. The Agent uses a built-in ReAct (Reason + Act) engine that automatically plans steps, calls tools, observes results, and iterates until the task is complete.
+`cli` **launches directly into AI Agent mode** — no need to run a separate `agent` command. The Agent uses a built-in ReAct (Reason + Act) engine that automatically plans steps, calls tools, observes results, and iterates until the task is complete.
 
 ### Architecture Overview
 
 ```
-User (natural language) → AI Agent (reasoning engine) → Tool calls → Server
+User (natural language / slash commands) → AI Agent (reasoning engine) → Tool calls → Server
                                     ↑
-                          LLM API (Claude / OpenAI / local model)
+                          LLM API (Claude / OpenAI / Hub relay / local model)
 ```
 
 The Agent understands the real server architecture:
@@ -428,27 +471,31 @@ External request → Nginx(:80/:443) → Ruoyi Proxy(:8000) → Java apps(:8080/
 ### Quick Start
 
 ```bash
-# Step 1: Configure your AI provider
-ruoyi> agent-config
+# Start CLI (Agent mode)
+./ruoyi-proxy-linux cli
 
-# Step 2: Enter Agent mode
-ruoyi> agent
+# Configure AI provider (first time)
+/agent-config
 
-# Start chatting
-🤖 You: Show me the nginx config file
-🤖 You: Change the timeout in /etc/nginx/conf.d/default.conf to 60s
-🤖 You: Install htop and check current system load
+# Natural language
+You: Show me the nginx config file
+You: Change the timeout in /etc/nginx/conf.d/default.conf to 60s
+You: Install htop and check current system load
+
+# Or slash commands
+/status
+/deploy
 ```
 
 ### Configuring the AI Provider
 
-Run `agent-config` and fill in the following:
+Run `/agent-config` and fill in the following:
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **provider** | LLM provider type | `anthropic` / `openai` |
-| **api_key** | API key | `sk-...` |
-| **base_url** | API endpoint (optional) | `https://api.deepseek.com` |
+| **provider** | LLM provider type | `anthropic` / `openai` / `hub` |
+| **api_key** | API key (not needed for Hub mode) | `sk-...` |
+| **base_url** | API endpoint (Hub URL for Spoke mode) | `https://api.deepseek.com` |
 | **model** | Model to use | `claude-opus-4-5` |
 | **max_tokens** | Max output tokens | `8096` |
 | **timeout** | Request timeout (seconds) | `120` |
@@ -463,12 +510,12 @@ model:     claude-opus-4-5
 
 # OpenAI
 provider:  openai
-base_url:  https://api.openai.com
+base_url:  https://api.openai.com/v1
 model:     gpt-4o
 
 # DeepSeek (OpenAI-compatible)
 provider:  openai
-base_url:  https://api.deepseek.com
+base_url:  https://api.deepseek.com/v1
 model:     deepseek-chat
 
 # Ollama (local model)
@@ -476,9 +523,14 @@ provider:  openai
 base_url:  http://localhost:11434/v1
 model:     qwen2.5:14b
 api_key:   ollama
+
+# Hub mode (Spoke node)
+provider:  hub
+base_url:  https://your-hub.example.com
+# Enter one-time registration token from Hub /hub-token on first run
 ```
 
-Config is saved to `~/.ruoyi-agent.json` and loaded automatically on next start.
+Config is saved under the `ai` key in `configs/app_config.json` and loaded automatically on next start.
 
 ### Available Tools
 
@@ -554,6 +606,70 @@ For complex tasks, the Agent runs up to **30 reasoning rounds**. If still incomp
 
 ---
 
+## 🌐 Hub AI Gateway
+
+For multi-server operations, use the Hub/Spoke architecture to centralize AI credentials: Hub holds the API key and forwards AI requests; Spokes execute tools locally without storing secrets.
+
+### Architecture
+
+```
+Spoke server A ──┐
+Spoke server B ──┼──► Hub (central AI key) ──► LLM API
+Spoke server C ──┘         ▲
+                           │
+                    Tools still run on each Spoke
+```
+
+### Deployment Steps
+
+**1. Build Hub package**
+
+```bash
+# Write ai section (with api_key) in configs/app_config.json first
+make linux-hub
+# Output: bin/ruoyi-proxy-linux-hub
+```
+
+Hub package embeds AI config with `hub.enabled=true`; deploy and chat via `/agent-config`.
+
+**2. Build Spoke package**
+
+```bash
+make linux-spoke HUB_URL=https://your-hub.example.com
+# Output: bin/ruoyi-proxy-linux-spoke
+```
+
+Spoke package embeds Hub URL only — no API key.
+
+**3. Generate registration token on Hub**
+
+```bash
+/hub-token
+# Or via management API: curl http://localhost:8001/hub/token
+```
+
+**4. Register on Spoke**
+
+```bash
+/agent-config
+# Choose provider=hub, enter Hub URL and one-time token
+```
+
+### API Endpoints
+
+| Endpoint | Port | Description |
+|----------|------|-------------|
+| `/__hub__/v1/token` | 8000 (proxy) | Generate one-time registration token |
+| `/__hub__/v1/register` | 8000 (proxy) | Spoke registration |
+| `/__hub__/v1/chat` | 8000 (proxy) | AI chat relay (v1 non-streaming) |
+| `/hub/token` | 8001 (mgmt) | Admin token generation |
+| `/hub/status` | 8001 (mgmt) | Spoke list |
+| `/hub/revoke` | 8001 (mgmt) | Revoke Spoke |
+
+> Hub requires Nginx `location ^~ /__hub__/` routing to the proxy port. Use `/self-check` or `/fix-nginx-hub` for diagnostics and AI-assisted fixes.
+
+---
+
 ## 🔄 Deployment Workflow
 
 ### Blue-Green Deployment Steps
@@ -589,13 +705,16 @@ For complex tasks, the Agent runs up to **30 reasoning rounds**. If still incomp
 ```bash
 ./ruoyi-proxy-linux cli
 
-ruoyi> deploy          # Run the full automated deployment
+# Standard blue-green (zero downtime, both envs running)
+/deploy
 
-# Or control each step manually
-ruoyi> status          # Check current state
-ruoyi> switch green    # Route traffic to green
-ruoyi> status          # Confirm the switch
-ruoyi> switch blue     # Rollback if needed
+# Low-memory deploy (stop old, start new — for small VPS)
+/deploy-lowmem
+
+# Or step by step
+/status          # Check current state
+/switch          # Route traffic
+/status          # Confirm the switch
 ```
 
 ### Production Recommendations
@@ -635,7 +754,7 @@ tail -f /var/log/ruoyi-proxy.log
 **Solution**:
 ```bash
 netstat -tlnp | grep 8000
-ruoyi> config-edit   # Change the port in config
+/config          # View/edit configuration
 ```
 
 ### Config Changes Not Taking Effect
@@ -645,7 +764,7 @@ ruoyi> config-edit   # Change the port in config
 **Solution**:
 ```bash
 rm configs/*.json
-ruoyi> init
+/init
 ```
 
 ### Build Failures
@@ -661,13 +780,13 @@ make build
 
 ### Proxy Fails to Start
 
-**Problem**: `proxy-start` returns an error
+**Problem**: `/proxy-start` returns an error
 
 **Solution**:
 ```bash
 make build                    # Ensure binary is compiled
 netstat -tlnp | grep 8001     # Check port availability
-ruoyi> logs                   # View detailed logs
+/logs                         # View detailed logs
 ```
 
 ### HTTPS Certificate Request Fails
@@ -718,9 +837,8 @@ ruoyi> logs                   # View detailed logs
 | **cmd/proxy** | Entry point | Starts all services, initializes config |
 | **internal/config** | Config management | Load, save, validate config files |
 | **internal/proxy** | Reverse proxy | Core proxy logic and blue-green switching |
-| **internal/handler** | HTTP handlers | Management API endpoints |
-| **internal/cli** | CLI interface | Interactive command-line interface |
-| **internal/sync** | File sync | Primary/replica server file synchronization |
+| **internal/hub** | Hub gateway | Spoke registration, AI relay, token management |
+| **internal/cli** | CLI interface | Agent-first entry, slash command dispatch |
 | **internal/agent** | AI operations | ReAct engine, tools, LLM adapters |
 
 ### Data Flow
