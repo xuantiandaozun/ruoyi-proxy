@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"ruoyi-proxy/internal/config"
+	"ruoyi-proxy/internal/database"
 )
 
 // ——— 工具定义 ———
@@ -126,6 +128,71 @@ var AllTools = []ToolDef{
 				},
 			},
 			"required": []string{"action", "service"},
+		},
+	},
+	{
+		Name:        "database_connections",
+		Description: "列出已保存的远程 MySQL 项目连接，或辅助扫描本机配置。手动连接是主流程，每条连接都有独立的项目名称，不要求属于当前部署项目",
+		ReadOnly:    false,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"action":       map[string]interface{}{"type": "string", "enum": []string{"discover", "list"}},
+				"project_path": map[string]interface{}{"type": "string", "description": "需要扫描的项目目录"},
+				"project_name": map[string]interface{}{"type": "string", "description": "list 时按业务项目名称过滤"},
+				"save":         map[string]interface{}{"type": "boolean", "description": "是否保存发现的连接档案，默认 false"},
+			},
+			"required": []string{"action"},
+		},
+	},
+	{
+		Name:        "database_save_connection",
+		Description: "保存或更新远程 MySQL 项目连接。用户在对话中给出地址、账号和密码时调用；同一服务器可保存多个项目。密码保存到独立密钥文件且不会在结果中回显。更新时传 id",
+		ReadOnly:    false,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":           map[string]interface{}{"type": "string", "description": "更新已有连接时传档案 ID"},
+				"project_name": map[string]interface{}{"type": "string", "description": "该连接所属的业务项目名称"},
+				"name":         map[string]interface{}{"type": "string", "description": "便于识别的连接名称，如 订单系统生产库"},
+				"environment":  map[string]interface{}{"type": "string", "description": "环境，如 prod/test/dev"},
+				"host":         map[string]interface{}{"type": "string", "description": "远程 MySQL 地址或域名"},
+				"port":         map[string]interface{}{"type": "integer", "description": "端口，默认 3306"},
+				"database":     map[string]interface{}{"type": "string", "description": "数据库名"},
+				"username":     map[string]interface{}{"type": "string", "description": "用户名"},
+				"password":     map[string]interface{}{"type": "string", "description": "密码；更新时留空表示保留旧密码"},
+				"remark":       map[string]interface{}{"type": "string", "description": "服务器、用途等备注"},
+			},
+			"required": []string{"project_name", "host", "database", "username"},
+		},
+	},
+	{
+		Name:        "database_test",
+		Description: "测试已保存的远程 MySQL 连接。profile 为连接 ID 或名称",
+		ReadOnly:    true,
+		Parameters:  map[string]interface{}{"type": "object", "properties": map[string]interface{}{"profile": map[string]interface{}{"type": "string"}}, "required": []string{"profile"}},
+	},
+	{
+		Name:        "database_schema",
+		Description: "查看指定数据库档案的表和字段结构。profile 为 /db-list 中的 ID 或名称",
+		ReadOnly:    true,
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"profile": map[string]interface{}{"type": "string"}},
+			"required":   []string{"profile"},
+		},
+	},
+	{
+		Name:        "database_query",
+		Description: "在指定数据库执行 SQL。SELECT/SHOW/DESCRIBE/EXPLAIN 自动执行；写入、DDL 和多语句必须由用户确认。查询最多返回 200 行",
+		ReadOnly:    false,
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"profile": map[string]interface{}{"type": "string", "description": "数据库档案 ID 或名称"},
+				"sql":     map[string]interface{}{"type": "string", "description": "要执行的 SQL"},
+			},
+			"required": []string{"profile", "sql"},
 		},
 	},
 
@@ -335,6 +402,10 @@ func (e *ToolExecutor) Execute(name, argsJSON string) (string, error) {
 	}
 
 	switch name {
+	case "query_cli_commands":
+		query, _ := args["query"].(string)
+		category, _ := args["category"].(string)
+		return queryCLICommands(query, category)
 	case "get_status":
 		return e.getStatus()
 	case "get_logs":
@@ -374,6 +445,49 @@ func (e *ToolExecutor) Execute(name, argsJSON string) (string, error) {
 			lines = int(v)
 		}
 		return e.systemdInfo(action, svc, lines)
+	case "database_connections":
+		action, _ := args["action"].(string)
+		projectPath, _ := args["project_path"].(string)
+		projectName, _ := args["project_name"].(string)
+		save, _ := args["save"].(bool)
+		return e.databaseConnections(action, projectPath, projectName, save)
+	case "database_save_connection":
+		raw, err := json.Marshal(args)
+		if err != nil {
+			return "", fmt.Errorf("解析数据库连接参数失败: %v", err)
+		}
+		var input database.ConnectionInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return "", fmt.Errorf("解析数据库连接参数失败: %v", err)
+		}
+		return e.databaseSaveConnection(input)
+	case "database_test":
+		profile, _ := args["profile"].(string)
+		return e.databaseTest(profile)
+	case "database_schema":
+		profile, _ := args["profile"].(string)
+		return e.databaseSchema(profile)
+	case "database_query":
+		profile, _ := args["profile"].(string)
+		statement, _ := args["sql"].(string)
+		return e.databaseQuery(profile, statement)
+	case "scheduled_tasks":
+		return e.scheduledTasks(args)
+	case "hub_spokes":
+		action, _ := args["action"].(string)
+		spokeID, _ := args["spoke_id"].(string)
+		return e.hubSpokes(action, spokeID)
+	case "hub_remote_command":
+		spokeID, _ := args["spoke_id"].(string)
+		command, _ := args["command"].(string)
+		workDir, _ := args["workdir"].(string)
+		timeoutSecs := int(int64Number(args["timeout_seconds"]))
+		waitSecs := int(int64Number(args["wait_seconds"]))
+		return e.hubRemoteCommand(spokeID, command, workDir, timeoutSecs, waitSecs)
+	case "hub_remote_jobs":
+		spokeID, _ := args["spoke_id"].(string)
+		jobID, _ := args["job_id"].(string)
+		return e.hubRemoteJobs(spokeID, jobID)
 	case "service_control":
 		action, _ := args["action"].(string)
 		return e.serviceControl(action)
@@ -442,6 +556,110 @@ func (e *ToolExecutor) Execute(name, argsJSON string) (string, error) {
 	default:
 		return "", fmt.Errorf("未知工具: %s", name)
 	}
+}
+
+func (e *ToolExecutor) databaseConnections(action, projectPath, projectName string, save bool) (string, error) {
+	var profiles []database.Profile
+	var err error
+	switch action {
+	case "list":
+		profiles, err = database.LoadProfiles()
+	case "discover":
+		if strings.TrimSpace(projectPath) == "" {
+			return "", fmt.Errorf("project_path 不能为空")
+		}
+		profiles, err = database.Discover(projectPath)
+		if err == nil && save {
+			for _, profile := range profiles {
+				if saveErr := database.SaveProfile(profile); saveErr != nil {
+					return "", saveErr
+				}
+			}
+		}
+	default:
+		return "", fmt.Errorf("不支持的数据库连接操作: %s", action)
+	}
+	if err != nil {
+		return "", err
+	}
+	if action == "list" && strings.TrimSpace(projectName) != "" {
+		filtered := profiles[:0]
+		for _, profile := range profiles {
+			if strings.EqualFold(profile.ProjectName, strings.TrimSpace(projectName)) {
+				filtered = append(filtered, profile)
+			}
+		}
+		profiles = filtered
+	}
+	raw, err := json.MarshalIndent(profiles, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("格式化数据库档案失败: %v", err)
+	}
+	return string(raw), nil
+}
+
+func (e *ToolExecutor) databaseSaveConnection(input database.ConnectionInput) (string, error) {
+	profile, err := database.SaveConnection(input)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("格式化数据库档案失败: %v", err)
+	}
+	return string(raw), nil
+}
+
+func (e *ToolExecutor) databaseTest(ref string) (string, error) {
+	profile, err := database.GetProfile(ref)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := database.Test(ctx, profile); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("连接成功: %s (%s:%d/%s)", profile.Name, profile.Host, profile.Port, profile.Database), nil
+}
+
+func (e *ToolExecutor) databaseSchema(ref string) (string, error) {
+	profile, err := database.GetProfile(ref)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	result, err := database.Schema(ctx, profile)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("格式化数据库结构失败: %v", err)
+	}
+	return string(raw), nil
+}
+
+func (e *ToolExecutor) databaseQuery(ref, statement string) (string, error) {
+	if strings.TrimSpace(statement) == "" {
+		return "", fmt.Errorf("SQL 不能为空")
+	}
+	profile, err := database.GetProfile(ref)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := database.Execute(ctx, profile, statement)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("格式化 SQL 结果失败: %v", err)
+	}
+	return string(raw), nil
 }
 
 // ——— 只读工具实现 ───────────────────────────────────────────

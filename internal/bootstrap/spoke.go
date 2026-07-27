@@ -3,8 +3,13 @@ package bootstrap
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +19,10 @@ import (
 	"ruoyi-proxy/internal/hub"
 )
 
+const currentSpokeProfileVersion = 2
+
+var publicIPDetector = detectPublicIP
+
 // RunSpokeCLI Spoke CLI 首次启动：自检 + 交互采集 + 同步 Hub
 func RunSpokeCLI(io *CLIO) {
 	if !shouldRunSpokeBootstrap() {
@@ -21,25 +30,32 @@ func RunSpokeCLI(io *CLIO) {
 	}
 
 	state := LoadState()
-	if !state.SpokeCLIDone {
+	profile, err := loadLocalSpokeProfile()
+	if err != nil {
 		if err := RunSpokeOnboardingNow(io); err != nil {
 			io.Print("\033[1;33m引导未完成: " + err.Error() + "\033[0m")
 		}
-	} else {
-		io.Print(FormatCheckReport("Spoke 节点环境自检", RunSpokeChecks()))
-		// 已引导过仍尝试同步档案（例如 Hub 刚恢复）
-		if profile, err := loadLocalSpokeProfile(); err == nil {
-			_ = SyncProfileToHub(profile)
-		} else {
-			io.Print("\033[1;33m未找到本机 Spoke 档案，将重新进入配置引导。\033[0m")
-			if err := runSpokeOnboarding(io); err != nil {
-				io.Print("\033[1;33m引导未完成: " + err.Error() + "\033[0m")
-				return
-			}
-			state.SpokeCLIDone = true
-			_ = SaveState(state)
-		}
+		return
 	}
+
+	if spokeProfileNeedsUpgrade(profile) {
+		title := "Spoke 档案资料补全"
+		if profile.SchemaVersion < currentSpokeProfileVersion {
+			title = fmt.Sprintf("Spoke 档案升级 v%d → v%d", profile.SchemaVersion, currentSpokeProfileVersion)
+		}
+		io.Print("\n\033[1;34m═══ " + title + " ═══\033[0m")
+		io.Print("检测到新版需要补充服务器资料；已有信息会保留，只询问缺失项。\n")
+		if err := upgradeSpokeProfile(io, &profile); err != nil {
+			io.Print("\033[1;33m档案升级未完成: " + err.Error() + "\033[0m")
+			return
+		}
+		io.Print("\033[1;32m✓ Spoke 档案升级并同步完成\033[0m\n")
+	} else if err := SyncProfileToHub(profile); err != nil {
+		io.Print("\033[1;33mSpoke 档案同步失败，将在下次启动重试: " + err.Error() + "\033[0m")
+	}
+
+	state.SpokeCLIDone = true
+	_ = SaveState(state)
 }
 
 func shouldRunSpokeBootstrap() bool {
@@ -97,21 +113,45 @@ func runSpokeOnboarding(io *CLIO) error {
 	typeChoice, _ := io.Ask(fmt.Sprintf("\033[1;33m项目类型\033[0m [默认 %s，直接回车确认]: ", typeHint))
 	projectType := mapProjectType(strings.TrimSpace(typeChoice), typeHint)
 
-	desc, _ := io.Ask("\033[1;33m简要说明\033[0m (可选): ")
+	publicIP := publicIPDetector()
+	if publicIP != "" {
+		io.Print(fmt.Sprintf("\033[1;36m检测到公网 IP: %s\033[0m", publicIP))
+		input, _ := io.Ask(fmt.Sprintf("\033[1;33m公网 IP\033[0m [默认 %s，回车确认]: ", publicIP))
+		if strings.TrimSpace(input) != "" {
+			if value := normalizeIPAddress(input); value != "" {
+				publicIP = value
+			} else {
+				io.Print("\033[1;33m输入不是有效 IP，将继续使用自动检测结果。\033[0m")
+			}
+		}
+	} else {
+		input, _ := io.Ask("\033[1;33m公网 IP\033[0m (自动检测失败，请输入；不确定可留空由 Hub 记录来源 IP): ")
+		publicIP = normalizeIPAddress(input)
+		if strings.TrimSpace(input) != "" && publicIP == "" {
+			io.Print("\033[1;33m输入不是有效 IP，将由 Hub 使用连接来源 IP 兜底。\033[0m")
+		}
+	}
+
+	desc, _ := io.Ask("\033[1;33m服务器备注\033[0m (如负责人、用途或注意事项，可选): ")
 	desc = strings.TrimSpace(desc)
 
 	paths := LoadAppPaths()
 	appHome, _ := os.Getwd()
 
 	profile := hub.SpokeProfile{
-		Hostname:    Hostname(),
-		Label:       label,
-		ProjectName: projectName,
-		ProjectType: projectType,
-		Description: desc,
-		Domain:      paths.Domain,
-		AppHome:     appHome,
-		UpdatedAt:   time.Now(),
+		SchemaVersion: currentSpokeProfileVersion,
+		Hostname:      Hostname(),
+		Label:         label,
+		PublicIP:      publicIP,
+		PrivateIPs:    localIPAddresses(),
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		ProjectName:   projectName,
+		ProjectType:   projectType,
+		Description:   desc,
+		Domain:        paths.Domain,
+		AppHome:       appHome,
+		UpdatedAt:     time.Now(),
 	}
 	profile.Services = collectServiceRefs()
 
@@ -132,6 +172,171 @@ func runSpokeOnboarding(io *CLIO) error {
 		io.Print("在 Hub 端使用 /hub-status 可查看所有 Spoke 节点。\n")
 	}
 	return nil
+}
+
+func upgradeSpokeProfile(io *CLIO, profile *hub.SpokeProfile) error {
+	if err := migrateSpokeProfile(io, profile); err != nil {
+		return err
+	}
+	if err := applyProfileLocally(profile); err != nil {
+		return fmt.Errorf("更新本地项目配置: %v", err)
+	}
+	raw, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("编码 Spoke 档案: %v", err)
+	}
+	if err := SaveSpokeProfile(raw); err != nil {
+		return fmt.Errorf("保存 Spoke 档案: %v", err)
+	}
+	if err := SyncProfileToHub(*profile); err != nil {
+		return fmt.Errorf("提交 Hub: %v", err)
+	}
+	return nil
+}
+
+func migrateSpokeProfile(io *CLIO, profile *hub.SpokeProfile) error {
+	if io == nil || profile == nil {
+		return fmt.Errorf("缺少档案迁移参数")
+	}
+	originalVersion := profile.SchemaVersion
+	profile.Hostname = Hostname()
+	profile.OS = runtime.GOOS
+	profile.Arch = runtime.GOARCH
+	profile.PrivateIPs = localIPAddresses()
+	profile.Services = collectServiceRefs()
+	profile.UpdatedAt = time.Now()
+	if wd, err := os.Getwd(); err == nil {
+		profile.AppHome = filepath.Clean(wd)
+	}
+	if profile.Domain == "" {
+		profile.Domain = LoadAppPaths().Domain
+	}
+
+	if strings.TrimSpace(profile.Label) == "" {
+		value, err := io.Ask("\033[1;33m服务器用途/别名\033[0m (如: 生产-订单服务，回车使用主机名): ")
+		if err != nil {
+			return err
+		}
+		profile.Label = strings.TrimSpace(value)
+		if profile.Label == "" {
+			profile.Label = profile.Hostname
+		}
+	}
+	if strings.TrimSpace(profile.ProjectName) == "" {
+		value, err := io.Ask("\033[1;33m项目名称\033[0m (如: ruoyi-admin，可选): ")
+		if err != nil {
+			return err
+		}
+		profile.ProjectName = strings.TrimSpace(value)
+	}
+	if strings.TrimSpace(profile.ProjectType) == "" {
+		detected := DetectProjectType()
+		if detected != "" {
+			io.Print(fmt.Sprintf("\033[1;36m检测到项目类型: %s\033[0m", detected))
+			profile.ProjectType = detected
+		} else {
+			value, err := io.Ask("\033[1;33m项目类型\033[0m (java/node/python/docker/go/other): ")
+			if err != nil {
+				return err
+			}
+			profile.ProjectType = mapProjectType(strings.TrimSpace(value), "other")
+		}
+	}
+	if strings.TrimSpace(profile.PublicIP) == "" {
+		profile.PublicIP = publicIPDetector()
+		if profile.PublicIP != "" {
+			io.Print(fmt.Sprintf("\033[1;36m检测到公网 IP: %s\033[0m", profile.PublicIP))
+		} else if originalVersion < currentSpokeProfileVersion {
+			value, err := io.Ask("\033[1;33m公网 IP\033[0m (自动检测失败，请输入；不确定可留空由 Hub 兜底): ")
+			if err != nil {
+				return err
+			}
+			profile.PublicIP = normalizeIPAddress(value)
+			if strings.TrimSpace(value) != "" && profile.PublicIP == "" {
+				io.Print("\033[1;33m输入不是有效 IP，将由 Hub 使用连接来源 IP 兜底。\033[0m")
+			}
+		}
+	}
+	if originalVersion < currentSpokeProfileVersion && strings.TrimSpace(profile.Description) == "" {
+		value, err := io.Ask("\033[1;33m服务器备注\033[0m (负责人、用途或注意事项，可选): ")
+		if err != nil {
+			return err
+		}
+		profile.Description = strings.TrimSpace(value)
+	}
+	profile.SchemaVersion = currentSpokeProfileVersion
+	return nil
+}
+
+func spokeProfileNeedsUpgrade(profile hub.SpokeProfile) bool {
+	return profile.SchemaVersion < currentSpokeProfileVersion ||
+		strings.TrimSpace(profile.Label) == "" ||
+		strings.TrimSpace(profile.ProjectType) == "" ||
+		strings.TrimSpace(profile.OS) == "" ||
+		strings.TrimSpace(profile.Arch) == ""
+}
+
+func detectPublicIP() string {
+	client := &http.Client{Timeout: 4 * time.Second}
+	endpoints := []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+	}
+	for _, endpoint := range endpoints {
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", "ruoyi-proxy/spoke-register")
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
+		resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		if value := normalizeIPAddress(string(data)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeIPAddress(value string) string {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func localIPAddresses() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, addr := range addrs {
+		var ip net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		seen[ip.String()] = true
+	}
+	items := make([]string, 0, len(seen))
+	for value := range seen {
+		items = append(items, value)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func mapProjectType(choice, fallback string) string {

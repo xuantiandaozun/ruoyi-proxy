@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/glamour"
 
 	"ruoyi-proxy/internal/buildinfo"
+	"ruoyi-proxy/internal/database"
 )
 
 const (
@@ -383,6 +384,9 @@ func (a *Agent) loadSessionByRef(ref string) error {
 	a.current = meta
 	a.persistSession()
 	a.print(fmt.Sprintf("\033[1;36mℹ 已加载会话: %s (%s)\033[0m", meta.Title, meta.ID))
+	if transcript := formatSessionTranscript(messages); transcript != "" {
+		a.print("\n" + transcript)
+	}
 	a.print("\033[1;36mℹ " + a.ctx.Summary() + "\033[0m")
 	return nil
 }
@@ -493,7 +497,8 @@ func (a *Agent) runReActOnce(ctx context.Context) (bool, error) {
 		var toolCalls []ToolCall
 		var reasoningContent string
 
-		fmt.Print("\n\033[1;35mAI\033[0m:\n")
+		var pendingText strings.Builder
+		outputStarted := false
 		ms := newMDStream()
 
 		for event := range eventCh {
@@ -508,8 +513,18 @@ func (a *Agent) runReActOnce(ctx context.Context) (bool, error) {
 
 			switch event.Type {
 			case "text":
-				ms.feed(event.Text)
 				textBuf.WriteString(event.Text)
+				if outputStarted {
+					ms.feed(event.Text)
+					break
+				}
+				pendingText.WriteString(event.Text)
+				if strings.TrimSpace(pendingText.String()) != "" {
+					fmt.Print("\n\033[1;35mAI\033[0m:\n")
+					ms.feed(pendingText.String())
+					pendingText.Reset()
+					outputStarted = true
+				}
 			case "tool_calls":
 				toolCalls = append(toolCalls, event.ToolCalls...)
 			case "done":
@@ -522,8 +537,10 @@ func (a *Agent) runReActOnce(ctx context.Context) (bool, error) {
 			}
 		}
 
-		ms.finish()
-		fmt.Println()
+		if outputStarted {
+			ms.finish()
+			fmt.Println()
+		}
 
 		assistantContent := strings.TrimSpace(textBuf.String())
 
@@ -537,7 +554,9 @@ func (a *Agent) runReActOnce(ctx context.Context) (bool, error) {
 
 		// 没有工具调用 → 正常完成
 		if len(toolCalls) == 0 {
-			fmt.Println()
+			if outputStarted {
+				fmt.Println()
+			}
 			return true, nil
 		}
 
@@ -586,15 +605,21 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 	}
 
 	argsDisplay := formatArgs(tc.Arguments)
-	// 仅展示工具名称，参数和结果只进入上下文，不刷屏给用户。
-	fmt.Printf("\n\033[1;36m[工具调用]\033[0m %s\n", tc.Name)
-
 	// 判断本次调用是否真正需要确认：
 	// - ToolDef.ReadOnly=true  → 无需确认
 	// - run_shell 但命令是只读性质 → 无需确认
 	// - 其他写操作 → 需要确认
 	needsConfirm := toolDef != nil && !toolDef.ReadOnly
 	if needsConfirm && tc.Name == "run_shell" && isReadOnlyShellCmd(tc.Arguments) {
+		needsConfirm = false
+	}
+	if needsConfirm && tc.Name == "database_query" && isReadOnlyDatabaseToolCall(tc.Arguments) {
+		needsConfirm = false
+	}
+	if needsConfirm && tc.Name == "database_connections" && isReadOnlyDatabaseConnectionsCall(tc.Arguments) {
+		needsConfirm = false
+	}
+	if needsConfirm && tc.Name == "scheduled_tasks" && isReadOnlyScheduledTaskCall(tc.Arguments) {
 		needsConfirm = false
 	}
 
@@ -624,6 +649,27 @@ func (a *Agent) executeToolCall(tc ToolCall) (string, error) {
 	return result, nil
 }
 
+func isReadOnlyDatabaseToolCall(argsJSON string) bool {
+	var args struct {
+		SQL string `json:"sql"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return false
+	}
+	return database.IsReadOnlySQL(args.SQL)
+}
+
+func isReadOnlyDatabaseConnectionsCall(argsJSON string) bool {
+	var args struct {
+		Action string `json:"action"`
+		Save   bool   `json:"save"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) != nil {
+		return false
+	}
+	return (args.Action == "list" || args.Action == "discover") && !args.Save
+}
+
 // formatArgs 格式化工具参数为可读形式
 func formatArgs(argsJSON string) string {
 	if argsJSON == "" || argsJSON == "{}" {
@@ -635,6 +681,10 @@ func formatArgs(argsJSON string) string {
 	}
 	var parts []string
 	for k, v := range args {
+		lowerKey := strings.ToLower(k)
+		if strings.Contains(lowerKey, "password") || strings.Contains(lowerKey, "secret") || strings.Contains(lowerKey, "token") || strings.Contains(lowerKey, "api_key") {
+			v = "******"
+		}
 		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 	}
 	return strings.Join(parts, "  ")
@@ -684,7 +734,9 @@ func (a *Agent) defaultSystemPrompt() string {
 
 按部署模式选择优先级。**只有上一级无法满足需求时才降级**：
 
-### 第一优先级：CLI 命令（run_shell ./ruoyi-proxy cli <命令>）
+### 交互式 CLI 命令
+
+CLI 斜杠命令仅供用户在 Agent 提示符中输入。**禁止**通过 run_shell 执行 ./ruoyi-proxy cli <命令>：当前 CLI 是交互模式，不支持这种一次性子命令调用。
 
 **蓝绿代理模式**（8000 在跑或用户确认需要代理）优先用：
   start / stop / restart / deploy / deploy-lowmem / quick-deploy
@@ -706,6 +758,25 @@ func (a *Agent) defaultSystemPrompt() string {
 
 **只读工具**（无需确认）— get_status / get_logs / get_config / get_system_info / read_file / list_directory / systemd_info
 **写工具**（需确认）— service_control / switch_env / update_jvm / write_file / delete_file / manage_systemd / install_package
+
+### CLI 命令查询
+- query_cli_commands 是当前版本 CLI 斜杠命令的唯一查询入口，结果直接来自 CLI 共用命令目录
+- 用户询问“有哪些命令”、某类命令、命令用法，或自然语言需求对应哪个 CLI 命令时，必须先调用 query_cli_commands，不要凭提示词或记忆猜测
+- 自然语言运维仍优先调用对应专用工具；query_cli_commands 只负责查询和解释 CLI 命令，不执行命令
+
+### 远程数据库连接
+- 数据库连接是独立的“项目连接档案”，不从当前服务推断归属；一台服务器可以对应多个业务项目和多个环境
+- 用户提供项目名、远程 MySQL 地址、库名、用户名和密码并要求保存时，调用 database_save_connection；不要强制扫描项目文件
+- database_connections list 用于按项目名称选择已有连接；database_test 测试连通；database_schema/database_query 操作指定档案
+- 密码参数只用于写入本机独立密钥文件，不要在最终回复、连接列表或摘要中复述密码
+- 自动扫描只是用户明确要求扫描本机配置时的辅助方式，项目可以是任意技术栈，也可以与当前部署服务完全无关
+
+### AI 定时任务
+- scheduled_tasks 管理的是 ruoyi-proxy 自身的后台 AI 任务，使用独立本地 SQLite（configs/scheduler.db），与远程 MySQL 项目连接完全无关
+- 用户描述周期巡检、定时汇总或一次性未来任务时，调用 scheduled_tasks create；支持五段 Cron、@every 30m、@daily、@at RFC3339
+- 默认 allow_write=false；只有用户明确要求后台自动修改状态且理解无人值守风险时才设置 allow_write=true
+- list/history 是只读操作；create/update/enable/disable/delete/run_now 会由系统统一弹窗确认
+- 任务触发依赖 ruoyi-proxy CLI 或代理进程持续运行；创建后告知任务 ID、权限和下次执行时间
 
 ### 第三优先级：原始 shell 命令
 仅当上述两级都无法满足需求时，使用 run_shell 直接执行 shell 命令。
@@ -739,6 +810,11 @@ func (a *Agent) defaultSystemPrompt() string {
 
 **Hub 节点**：
 - 职责：AI 配置中心、Spoke 注册 Token（/hub-token）、节点列表（/hub-status）、AI 请求转发
+- hub_spokes 用于查询节点档案；hub_remote_command 用于让指定 Spoke 执行现场命令并等待结果；hub_remote_jobs 用于追踪任务
+- 用户询问某个远程项目/服务器“当前情况、是否正常、查日志/进程/端口”时：先用 hub_spokes 按名称或备注定位 spoke_id，再用 hub_remote_command 做现场检查
+- **禁止**仅凭 LastSeen 或档案信息断言业务服务健康；LastSeen 只代表 Spoke 最近与 Hub 通信过
+- **禁止**声称“Hub 无法远程访问 Spoke”或转而询问 SSH；只要节点支持远程控制，应优先使用 hub_remote_command
+- **禁止**用 run_shell 自行 curl /hub-status、/hub/control；Hub 管理端口是 127.0.0.1:8001，必须使用专用工具避免端口和路径错误
 - /self-check 检查：基础环境、:8000/:8001 网关、AI 配置、/__hub__/ Nginx 路由（若在用）
 - 本机业务服务自检仍按「部署模式判断」；**网关正常 ≠ 本机一定跑蓝绿业务**
 - 协助 Spoke 时参考其档案（项目类型/说明），按对方实际部署模式排查，勿一律 proxy-status 或蓝绿端口
@@ -748,6 +824,9 @@ func (a *Agent) defaultSystemPrompt() string {
 - /self-check 只检查本机基础环境与 Hub 连接；**不包含**蓝绿代理、Java 应用、/actuator/health
 - 完整服务自检须按「部署模式判断」自行探查；不要默认检查 proxy-status 或蓝绿端口
 - Hub 地址是远端 ai.base_url，勿用本机域名代替；不要检查本机 /__hub__/ Nginx 路由
+- 远程控制使用 Spoke 每 3 秒主动 HTTP 轮询，不是长连接；不要把 LastSeen 过期描述成“长连接断开”
+- 本机代理进程运行时由代理自动领取 Hub 任务，无需 spoke-agent；不运行代理的节点才使用独立 spoke-agent，交互 CLI 仅作临时兜底
+- 不要为了恢复远程控制而强行建议 proxy-start：先判断节点是否需要代理；无代理节点应检查或安装 ruoyi-proxy-spoke-agent
 
 **Hub 修复 /__hub__/ Nginx 路由**（仅 Hub、且用户同意后）：
   1. 用 read_file 读取 /etc/nginx/conf.d/ruoyi.conf，确认是否已有 location /__hub__/ 或 location ^~ /__hub__/
@@ -783,7 +862,9 @@ func nodeRolePrompt(aiCfg AIConfig) string {
 **Hub 网关职责**：
 - 集中持有 AI 配置；用 /hub-token 生成 Spoke 注册 Token，/hub-status 查看已注册节点及档案
 - 转发 Spoke 的 AI 请求；排查网关问题时可检查 :8000/:8001 与 /__hub__/ Nginx 路由
-- 远程协助 Spoke 时，以节点档案（项目类型、说明）和现场探测为准，**勿默认**对方有蓝绿代理或 Java actuator
+- 远程协助 Spoke 时，先用 hub_spokes 定位节点，再用 hub_remote_command 做现场探测；不要声称缺少 SSH 权限
+- 节点 LastSeen 只能说明控制/AI 通道近期活跃，不能代替业务进程、端口和健康接口检查
+- 现场探测以节点档案（项目类型、说明）为线索，**勿默认**对方有蓝绿代理或 Java actuator
 
 **本机运维（同样需自适应）**：
 - Hub 服务器本身不一定是蓝绿架构；管理本机服务时先探查实际环境（进程/端口/容器/systemd）

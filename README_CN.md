@@ -351,8 +351,29 @@ make clean              # 清理编译文件
 /hub-enable        # 启用 Hub 网关（需重启代理）
 /hub-disable       # 禁用 Hub 网关
 /hub-revoke <id>   # （Hub）吊销 Spoke
+/hub-exec <id> <命令> # （Hub）向 Spoke 下发远程命令
+/hub-jobs [id]     # （Hub）查看远程任务和结果
+/spoke-agent-install # 为不运行代理的 Spoke 安装常驻执行器
+/spoke-agent-status  # 查看远程控制归属或常驻执行器状态
 /self-check        # 运行环境自检
 /fix-nginx-hub     # 让 AI 修复 Nginx Hub 路由
+
+# 远程数据库
+/db-add            # 添加任意项目的远程 MySQL 连接
+/db-discover [目录] # 从项目配置发现 MySQL 连接
+/db-list           # 查看连接档案
+/db-test <id>      # 测试连接
+/db-schema <id>    # 查看表和字段
+/db-query <id> <SQL> # 执行受控 SQL
+
+# AI 定时任务
+/tasks             # 查看任务和下次执行时间
+/task-add          # 创建任务
+/task-enable <id>  # 启用任务
+/task-disable <id> # 暂停任务
+/task-run <id>     # 立即执行
+/task-history [id] # 查看执行历史
+/task-delete <id>  # 删除任务
 
 # 配置与系统
 /config            # 查看完整配置
@@ -574,6 +595,20 @@ Agent 可以调用以下工具（无需手动操作）：
 | `manage_systemd` | 管理 systemd 服务 | ✅ |
 | `systemd_info` | 查询服务状态 | ❌ |
 
+#### 🌐 Hub、数据库与任务
+
+| 工具 | 说明 | 是否需要确认 |
+|------|------|:----------:|
+| `query_cli_commands` | 查询当前版本实际支持的斜杠命令和用法 | ❌ |
+| `hub_spokes` | 查询 Spoke 档案和节点 ID | ❌ |
+| `hub_remote_command` | 通过任务队列让 Spoke 执行远程命令 | ✅ |
+| `hub_remote_jobs` | 查询远程任务状态和结果 | ❌ |
+| `database_connections` | 查询或发现 MySQL 连接档案 | 视操作而定 |
+| `database_save_connection` | 保存 MySQL 项目连接，密钥独立存储 | ✅ |
+| `database_test` / `database_schema` | 测试连接或查看结构 | ❌ |
+| `database_query` | 只读 SQL 自动执行，写入和 DDL 需确认 | 视 SQL 而定 |
+| `scheduled_tasks` | 管理 SQLite 持久化的 AI 定时任务 | 视操作而定 |
+
 **自动识别包管理器**：apt-get → dnf → yum → pacman → apk → zypper，无需关心 Linux 发行版差异。
 
 **只读命令自动放行**（不弹确认框）：
@@ -650,6 +685,14 @@ Spoke 服务器 C ──┘         ▲
                     工具仍在 Spoke 本地执行
 ```
 
+Hub 远程控制不需要连接 Spoke 入站端口。Hub 把命令保存到任务队列，Spoke 每 3 秒通过出站 HTTP 轮询领取并回传结果：
+
+```text
+Hub CLI / AI → Hub 任务队列 ← Spoke 主动轮询 → 本机 Shell
+```
+
+远程命令始终需要 Hub 用户确认。Hub 管理端只监听 `127.0.0.1:8001`；Spoke 使用注册后的长期凭证访问公开的 `/__hub__/v1/control/*` 接口。
+
 ### 部署步骤
 
 **1. 打包 Hub 节点**
@@ -685,6 +728,25 @@ Spoke 包只嵌入 Hub 地址，不含 API Key。
 # 选择 provider=hub，填入 Hub 地址与一次性 Token
 ```
 
+**5. 选择 Spoke 远程控制运行方式**
+
+如果该 Spoke 运行蓝绿代理，代理进程会自动领取 Hub 任务，无需安装额外常驻服务：
+
+```bash
+systemctl restart ruoyi-proxy
+```
+
+如果该节点不运行代理，只作为通用运维节点，则安装独立执行器：
+
+```bash
+/spoke-agent-install
+/spoke-agent-status
+```
+
+已安装的 `spoke-agent` 检测到代理运行时会自动待机，代理停止后再接管轮询。交互 CLI 仅在没有代理时提供临时轮询。
+
+> 更新正在运行的二进制时，建议先上传为 `.new`，再用同目录 `mv -f` 原子替换，最后重启对应服务；只覆盖磁盘文件不会让旧进程加载新版本。
+
 ### API 端点
 
 | 端点 | 端口 | 说明 |
@@ -692,9 +754,13 @@ Spoke 包只嵌入 Hub 地址，不含 API Key。
 | `/__hub__/v1/token` | 8000（代理） | 生成一次性注册 Token |
 | `/__hub__/v1/register` | 8000（代理） | Spoke 注册 |
 | `/__hub__/v1/chat` | 8000（代理） | AI 聊天转发（v1 非流式） |
+| `/__hub__/v1/control/poll` | 8000（代理） | Spoke 领取远程任务 |
+| `/__hub__/v1/control/result` | 8000（代理） | Spoke 回传执行结果 |
 | `/hub/token` | 8001（管理） | 管理端生成 Token |
 | `/hub/status` | 8001（管理） | Spoke 列表 |
 | `/hub/revoke` | 8001（管理） | 吊销 Spoke |
+| `/hub/control` | 8001（管理） | Hub 本机创建远程任务 |
+| `/hub/jobs` | 8001（管理） | Hub 本机查询任务和结果 |
 
 > Hub 需在 Nginx 配置 `location ^~ /__hub__/` 转发到代理端口；可用 `/self-check` 自检，或用 `/fix-nginx-hub` 让 AI 辅助修复。
 >

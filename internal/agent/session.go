@@ -93,7 +93,7 @@ func (s *SessionStore) SaveSession(meta *SessionMeta, messages []Message) error 
 	}
 	meta.UpdatedAt = time.Now().Format(time.RFC3339)
 	s.fillStats(meta, messages)
-	if err := s.saveMessages(meta.ID, messages); err != nil {
+	if err := s.saveMessages(meta.ID, redactSessionSecrets(messages)); err != nil {
 		return err
 	}
 	items, err := s.ListSessions()
@@ -113,6 +113,34 @@ func (s *SessionStore) SaveSession(meta *SessionMeta, messages []Message) error 
 	}
 	s.sortSessions(items)
 	return s.saveIndex(items)
+}
+
+func redactSessionSecrets(messages []Message) []Message {
+	cloned := make([]Message, len(messages))
+	copy(cloned, messages)
+	for i := range cloned {
+		if len(cloned[i].ToolCalls) == 0 {
+			continue
+		}
+		cloned[i].ToolCalls = append([]ToolCall(nil), cloned[i].ToolCalls...)
+		for j := range cloned[i].ToolCalls {
+			if cloned[i].ToolCalls[j].Name != "database_save_connection" {
+				continue
+			}
+			var args map[string]interface{}
+			if json.Unmarshal([]byte(cloned[i].ToolCalls[j].Arguments), &args) != nil {
+				continue
+			}
+			if _, ok := args["password"]; ok {
+				args["password"] = "[已保存，未写入会话]"
+			}
+			raw, err := json.Marshal(args)
+			if err == nil {
+				cloned[i].ToolCalls[j].Arguments = string(raw)
+			}
+		}
+	}
+	return cloned
 }
 
 // LoadSession 加载指定会话。
@@ -210,8 +238,43 @@ func (s *SessionStore) sortSessions(items []SessionMeta) {
 }
 
 func (s *SessionStore) fillStats(meta *SessionMeta, messages []Message) {
-	meta.MessageCount = len(messages)
+	meta.MessageCount = countVisibleMessages(messages)
 	meta.UserTurns = countRealUserTurns(messages)
+}
+
+func countVisibleMessages(messages []Message) int {
+	count := 0
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" || content == autoResumePrompt {
+			continue
+		}
+		if msg.Role == "user" || msg.Role == "assistant" {
+			count++
+		}
+	}
+	return count
+}
+
+func formatSessionTranscript(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" || content == autoResumePrompt {
+			continue
+		}
+		switch msg.Role {
+		case "user":
+			sb.WriteString("\033[1;32mYou\033[0m:\n")
+		case "assistant":
+			sb.WriteString("\033[1;35mAI\033[0m:\n")
+		default:
+			continue
+		}
+		sb.WriteString(content)
+		sb.WriteString("\n\n")
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func formatSessionList(items []SessionMeta) string {

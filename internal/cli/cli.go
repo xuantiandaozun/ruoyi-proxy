@@ -25,11 +25,13 @@ import (
 
 // CLI 交互式命令行界面
 type CLI struct {
-	rl             *readline.Instance
-	running        bool
-	proxyPID       int    // 保存代理进程的PID
-	currentService string // 当前操作的服务ID
-	agentCancel    func() // Agent 取消函数，用于 Ctrl+C 中断 ReAct 循环
+	rl                *readline.Instance
+	running           bool
+	proxyPID          int    // 保存代理进程的PID
+	currentService    string // 当前操作的服务ID
+	agentCancel       func() // Agent 取消函数，用于 Ctrl+C 中断 ReAct 循环
+	spokeWorkerCancel func() // Spoke 远程控制轮询取消函数
+	schedulerCancel   func() // 本机 AI 定时任务调度器取消函数
 }
 
 // New 创建CLI实例
@@ -98,7 +100,24 @@ func (c *CLI) Start() {
 		readline.PcItem("hub-token"),
 		readline.PcItem("hub-status"),
 		readline.PcItem("hub-spoke"),
+		readline.PcItem("hub-exec"),
+		readline.PcItem("hub-jobs"),
 		readline.PcItem("hub-revoke"),
+		readline.PcItem("spoke-agent-install"),
+		readline.PcItem("spoke-agent-status"),
+		readline.PcItem("db-discover"),
+		readline.PcItem("db-add"),
+		readline.PcItem("db-list"),
+		readline.PcItem("db-test"),
+		readline.PcItem("db-schema"),
+		readline.PcItem("db-query"),
+		readline.PcItem("tasks"),
+		readline.PcItem("task-add"),
+		readline.PcItem("task-enable"),
+		readline.PcItem("task-disable"),
+		readline.PcItem("task-run"),
+		readline.PcItem("task-history"),
+		readline.PcItem("task-delete"),
 		readline.PcItem("self-check"),
 		readline.PcItem("fix-nginx-hub"),
 		readline.PcItem("/help"),
@@ -115,9 +134,26 @@ func (c *CLI) Start() {
 		readline.PcItem("/hub-token"),
 		readline.PcItem("/hub-status"),
 		readline.PcItem("/hub-spoke"),
+		readline.PcItem("/hub-exec"),
+		readline.PcItem("/hub-jobs"),
 		readline.PcItem("/hub-enable"),
 		readline.PcItem("/hub-disable"),
 		readline.PcItem("/hub-revoke"),
+		readline.PcItem("/spoke-agent-install"),
+		readline.PcItem("/spoke-agent-status"),
+		readline.PcItem("/db-discover"),
+		readline.PcItem("/db-add"),
+		readline.PcItem("/db-list"),
+		readline.PcItem("/db-test"),
+		readline.PcItem("/db-schema"),
+		readline.PcItem("/db-query"),
+		readline.PcItem("/tasks"),
+		readline.PcItem("/task-add"),
+		readline.PcItem("/task-enable"),
+		readline.PcItem("/task-disable"),
+		readline.PcItem("/task-run"),
+		readline.PcItem("/task-history"),
+		readline.PcItem("/task-delete"),
 		readline.PcItem("/self-check"),
 		readline.PcItem("/fix-nginx-hub"),
 		readline.PcItem("/sessions"),
@@ -132,6 +168,20 @@ func (c *CLI) Start() {
 	}
 
 	c.printBanner()
+	bootstrap.RunSpokeCLI(&bootstrap.CLIO{
+		Print: func(s string) { fmt.Println(s) },
+		Ask:   c.readLineWithPrompt,
+	})
+	c.restartSpokeControlWorker()
+	c.startTaskScheduler()
+	defer func() {
+		if c.spokeWorkerCancel != nil {
+			c.spokeWorkerCancel()
+		}
+		if c.schedulerCancel != nil {
+			c.schedulerCancel()
+		}
+	}()
 
 	// 设置信号处理，捕获 Ctrl+C
 	sigChan := make(chan os.Signal, 1)
@@ -463,6 +513,19 @@ func (c *CLI) printHelp() {
 	fmt.Println("    /agent-config   - 配置 AI 提供商")
 	fmt.Println("    /hub-enable     /hub-disable  - Hub 网关开关（需重启代理）")
 	fmt.Println("    /hub-token      /hub-status [id]   /hub-spoke <id>   /hub-revoke <id>")
+	fmt.Println("    /hub-exec <id> <命令>              /hub-jobs [id]")
+	fmt.Println("    /spoke-agent-install               /spoke-agent-status")
+	fmt.Println()
+	fmt.Println("  \033[1;33m远程数据库:\033[0m")
+	fmt.Println("    /db-add         - 向导添加任意项目的远程 MySQL 连接")
+	fmt.Println("    /db-list        - 按项目查看连接档案")
+	fmt.Println("    /db-test <id>   /db-schema <id>   /db-query <id> <SQL>")
+	fmt.Println()
+	fmt.Println("  \033[1;33mAI 定时任务（本地 SQLite）:\033[0m")
+	fmt.Println("    /tasks          - 查看任务及下次执行时间")
+	fmt.Println("    /task-add        - 创建任务向导（默认只读权限）")
+	fmt.Println("    /task-enable <id>   /task-disable <id>   /task-run <id>")
+	fmt.Println("    /task-history [id]  /task-delete <id>")
 	fmt.Println()
 	fmt.Println("  \033[1;33m其他:\033[0m")
 	fmt.Println("    /commands       - 显示此列表")
@@ -632,6 +695,61 @@ func (c *CLI) handleCommand(input string) {
 	case "jvm-config":
 		c.JVMConfig()
 
+	case "db-discover":
+		projectPath := "."
+		if len(args) > 0 {
+			projectPath = strings.Join(args, " ")
+		}
+		c.discoverDatabases(projectPath)
+
+	case "db-add":
+		c.addDatabaseInteractive()
+
+	case "db-list":
+		c.listDatabases()
+
+	case "db-test":
+		if len(args) == 0 {
+			c.printError("用法: /db-test <档案ID或名称>")
+			return
+		}
+		c.testDatabase(args[0])
+
+	case "db-schema":
+		if len(args) == 0 {
+			c.printError("用法: /db-schema <档案ID或名称>")
+			return
+		}
+		c.showDatabaseSchema(args[0])
+
+	case "db-query":
+		if len(args) < 2 {
+			c.printError("用法: /db-query <档案ID或名称> <SQL>")
+			return
+		}
+		c.queryDatabase(args[0], strings.Join(args[1:], " "))
+
+	case "tasks":
+		c.listScheduledTasks()
+
+	case "task-add":
+		c.addScheduledTaskInteractive()
+
+	case "task-enable":
+		c.scheduledTaskAction("enable", args)
+
+	case "task-disable":
+		c.scheduledTaskAction("disable", args)
+
+	case "task-run":
+		c.scheduledTaskAction("run", args)
+
+	case "task-history":
+		c.scheduledTaskHistory(args)
+
+	case "task-delete":
+		c.scheduledTaskAction("delete", args)
+
 	case "hub-enable":
 		c.handleHubEnable(true)
 
@@ -655,12 +773,28 @@ func (c *CLI) handleCommand(input string) {
 		}
 		c.handleHubSpoke(args[0])
 
+	case "hub-exec":
+		c.handleHubExec(args)
+
+	case "hub-jobs":
+		spokeID := ""
+		if len(args) > 0 {
+			spokeID = args[0]
+		}
+		c.handleHubJobs(spokeID)
+
 	case "hub-revoke":
 		if len(args) == 0 {
 			c.printError("请指定 spoke ID，例如: hub-revoke spoke-abc12345")
 			return
 		}
 		c.handleHubRevoke(args[0])
+
+	case "spoke-agent-install":
+		c.installSpokeAgentService()
+
+	case "spoke-agent-status":
+		c.showSpokeAgentStatus()
 
 	case "agent-config":
 		c.AgentConfig()
@@ -761,6 +895,7 @@ func (c *CLI) startProxyService() {
 	if c.isProxyRunning() {
 		c.printSuccess("代理服务已启动")
 		c.printInfo(fmt.Sprintf("代理端口: %s", proxyListenURL()))
+		c.restartSpokeControlWorker()
 	} else {
 		c.printError("代理服务启动失败，请检查日志")
 	}
@@ -769,6 +904,7 @@ func (c *CLI) startProxyService() {
 // stopProxyService 停止代理服务
 func (c *CLI) stopProxyService() {
 	c.printInfo("停止代理服务...")
+	defer c.restartSpokeControlWorker()
 
 	// 检查服务是否在运行
 	if !c.isProxyRunning() {
@@ -1454,7 +1590,7 @@ func (c *CLI) handleCert(args []string) {
 
 // addService 添加新服务
 func (c *CLI) addService() {
-	fmt.Println("\n\033[1;34m=== Add Service ===\033[0m\n")
+	fmt.Print("\n\033[1;34m=== Add Service ===\033[0m\n\n")
 
 	// ??ID
 	serviceID, err := c.readLineWithPrompt("[1;33m服务ID (英文标识, 如 admin/collector): [0m")
@@ -1612,7 +1748,7 @@ func (c *CLI) listServices() {
 
 // removeService 删除服务
 func (c *CLI) removeService() {
-	fmt.Println("\n\033[1;34m=== Remove Service ===\033[0m\n")
+	fmt.Print("\n\033[1;34m=== Remove Service ===\033[0m\n\n")
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {
@@ -1687,7 +1823,7 @@ func (c *CLI) selectRemovableServiceMenu(cfg *config.Config, ids []string) (stri
 
 // switchService 切换当前服务
 func (c *CLI) switchService() {
-	fmt.Println("\n\033[1;34m=== Switch Service ===\033[0m\n")
+	fmt.Print("\n\033[1;34m=== Switch Service ===\033[0m\n\n")
 
 	cfg, err := c.loadProxyConfig()
 	if err != nil {

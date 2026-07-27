@@ -351,8 +351,29 @@ make clean              # Clean build artifacts
 /hub-enable        # Enable Hub gateway (requires proxy restart)
 /hub-disable       # Disable Hub gateway
 /hub-revoke <id>   # (Hub) Revoke a Spoke
+/hub-exec <id> <command> # (Hub) Dispatch a remote command to a Spoke
+/hub-jobs [id]     # (Hub) View remote jobs and results
+/spoke-agent-install # Install the daemon on a Spoke without proxy mode
+/spoke-agent-status  # Show remote-control ownership or daemon status
 /self-check        # Run environment self-check
 /fix-nginx-hub     # Ask AI to fix Nginx Hub routing
+
+# Remote databases
+/db-add            # Add a remote MySQL connection for any project
+/db-discover [path] # Discover MySQL connections from project config
+/db-list           # List connection profiles
+/db-test <id>      # Test a connection
+/db-schema <id>    # View tables and columns
+/db-query <id> <SQL> # Execute controlled SQL
+
+# AI scheduled tasks
+/tasks             # List tasks and next run times
+/task-add          # Create a task
+/task-enable <id>  # Enable a task
+/task-disable <id> # Pause a task
+/task-run <id>     # Run immediately
+/task-history [id] # View run history
+/task-delete <id>  # Delete a task
 
 # Config & system
 /config            # View full configuration
@@ -573,6 +594,20 @@ The Agent can call these tools automatically:
 | `manage_systemd` | Manage systemd services | ✅ |
 | `systemd_info` | Query service status | ❌ |
 
+#### 🌐 Hub, Databases & Tasks
+
+| Tool | Description | Confirmation required |
+|------|-------------|:--------------------:|
+| `query_cli_commands` | Query slash commands and usage supported by the current build | ❌ |
+| `hub_spokes` | Query Spoke profiles and node IDs | ❌ |
+| `hub_remote_command` | Run a command on a Spoke through the Hub job queue | ✅ |
+| `hub_remote_jobs` | Query remote job status and results | ❌ |
+| `database_connections` | List or discover MySQL connection profiles | Depends on action |
+| `database_save_connection` | Save a project MySQL connection with separate secret storage | ✅ |
+| `database_test` / `database_schema` | Test a connection or inspect schema | ❌ |
+| `database_query` | Read-only SQL runs directly; writes and DDL require confirmation | Depends on SQL |
+| `scheduled_tasks` | Manage SQLite-backed AI scheduled tasks | Depends on action |
+
 **Auto-detected package managers**: apt-get → dnf → yum → pacman → apk → zypper
 
 **Read-only commands skip confirmation automatically**:  
@@ -648,6 +683,14 @@ Spoke server C ──┘         ▲
                     Tools still run on each Spoke
 ```
 
+Hub remote control does not require an inbound port on the Spoke. Hub stores commands in a job queue; each Spoke polls outbound over HTTP every three seconds and posts the result:
+
+```text
+Hub CLI / AI → Hub job queue ← outbound Spoke polling → local Shell
+```
+
+Remote commands always require Hub-side user confirmation. The Hub management API listens only on `127.0.0.1:8001`; Spokes use their registered long-lived credential for public `/__hub__/v1/control/*` endpoints.
+
 ### Deployment Steps
 
 **1. Build Hub package**
@@ -683,6 +726,25 @@ Spoke package embeds Hub URL only — no API key.
 # Choose provider=hub, enter Hub URL and one-time token
 ```
 
+**5. Choose the Spoke remote-control runtime**
+
+If the Spoke runs the blue-green proxy, the proxy process automatically polls Hub; no extra daemon is required:
+
+```bash
+systemctl restart ruoyi-proxy
+```
+
+If the node does not run proxy mode and is only a general operations node, install the standalone worker:
+
+```bash
+/spoke-agent-install
+/spoke-agent-status
+```
+
+An installed `spoke-agent` automatically idles while proxy mode is active and takes over after the proxy stops. The interactive CLI provides temporary polling only when the proxy is absent.
+
+> When updating a running binary, upload it as `.new`, atomically replace it with `mv -f` in the same directory, then restart the relevant service. Replacing the file on disk alone does not reload an existing process.
+
 ### API Endpoints
 
 | Endpoint | Port | Description |
@@ -690,9 +752,13 @@ Spoke package embeds Hub URL only — no API key.
 | `/__hub__/v1/token` | 8000 (proxy) | Generate one-time registration token |
 | `/__hub__/v1/register` | 8000 (proxy) | Spoke registration |
 | `/__hub__/v1/chat` | 8000 (proxy) | AI chat relay (v1 non-streaming) |
+| `/__hub__/v1/control/poll` | 8000 (proxy) | Spoke claims a remote job |
+| `/__hub__/v1/control/result` | 8000 (proxy) | Spoke posts execution results |
 | `/hub/token` | 8001 (mgmt) | Admin token generation |
 | `/hub/status` | 8001 (mgmt) | Spoke list |
 | `/hub/revoke` | 8001 (mgmt) | Revoke Spoke |
+| `/hub/control` | 8001 (mgmt) | Create a remote job locally on Hub |
+| `/hub/jobs` | 8001 (mgmt) | Query jobs and results locally on Hub |
 
 > Hub requires Nginx `location ^~ /__hub__/` routing to the proxy port. Use `/self-check` or `/fix-nginx-hub` for diagnostics and AI-assisted fixes.
 >

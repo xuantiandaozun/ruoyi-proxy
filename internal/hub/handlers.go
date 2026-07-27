@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -30,6 +31,20 @@ type chatResponse struct {
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	ToolCalls        []agent.ToolCall `json:"tool_calls,omitempty"`
 	Error            string           `json:"error,omitempty"`
+}
+
+type controlResultRequest struct {
+	JobID  string `json:"job_id"`
+	Status string `json:"status"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type controlEnqueueRequest struct {
+	SpokeID     string `json:"spoke_id"`
+	Command     string `json:"command"`
+	WorkDir     string `json:"workdir,omitempty"`
+	TimeoutSecs int    `json:"timeout_seconds,omitempty"`
 }
 
 // RegisterHandler POST /__hub__/v1/register
@@ -102,6 +117,10 @@ func ProfileHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无效请求体", http.StatusBadRequest)
 		return
 	}
+	profile.ObservedIP = clientIPFromRequest(r)
+	if profile.PublicIP == "" && isPublicIP(profile.ObservedIP) {
+		profile.PublicIP = profile.ObservedIP
+	}
 	if err := UpdateSpokeProfile(spokeID, profile); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -112,6 +131,28 @@ func ProfileHandler(w http.ResponseWriter, r *http.Request) {
 		"spoke":   spokeID,
 		"message": "profile updated",
 	})
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	remote := net.ParseIP(host)
+	if remote != nil && remote.IsLoopback() {
+		if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(value) != nil {
+			return value
+		}
+		if value := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); net.ParseIP(value) != nil {
+			return value
+		}
+	}
+	return host
+}
+
+func isPublicIP(value string) bool {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	return ip != nil && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified()
 }
 
 // ChatHandler POST /__hub__/v1/chat
@@ -164,6 +205,102 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 		ReasoningContent: resp.ReasoningContent,
 		ToolCalls:        resp.ToolCalls,
 	})
+}
+
+// ControlPollHandler GET /__hub__/v1/control/poll — Spoke 领取远程任务。
+func ControlPollHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只允许 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	spokeID, ok := authenticateSpoke(w, r)
+	if !ok {
+		return
+	}
+	job, err := ClaimControlJob(spokeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if job == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+// ControlResultHandler POST /__hub__/v1/control/result — Spoke 回传任务结果。
+func ControlResultHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只允许 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	spokeID, ok := authenticateSpoke(w, r)
+	if !ok {
+		return
+	}
+	var req controlResultRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 128<<10)).Decode(&req); err != nil {
+		http.Error(w, "无效请求体", http.StatusBadRequest)
+		return
+	}
+	if err := CompleteControlJob(spokeID, req.JobID, req.Status, req.Output, req.Error); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "job_id": req.JobID})
+}
+
+// ControlEnqueueAdminHandler POST /hub/control — Hub 本机创建远程任务。
+func ControlEnqueueAdminHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只允许 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var req controlEnqueueRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req); err != nil {
+		http.Error(w, "无效请求体", http.StatusBadRequest)
+		return
+	}
+	job, err := EnqueueControlJob(req.SpokeID, req.Command, req.WorkDir, req.TimeoutSecs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+// ControlJobsAdminHandler GET /hub/jobs — Hub 本机查询远程任务。
+func ControlJobsAdminHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "只允许 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	items, err := ListControlJobs(strings.TrimSpace(r.URL.Query().Get("spoke")), 20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": len(items), "jobs": items})
+}
+
+func authenticateSpoke(w http.ResponseWriter, r *http.Request) (string, bool) {
+	secret := bearerToken(r)
+	if secret == "" {
+		http.Error(w, "缺少 Authorization", http.StatusUnauthorized)
+		return "", false
+	}
+	spokeID, ok := ValidateSpokeToken(secret)
+	if !ok {
+		http.Error(w, "无效或已吊销的凭证", http.StatusUnauthorized)
+		return "", false
+	}
+	return spokeID, true
 }
 
 func writeChatError(w http.ResponseWriter, msg string) {

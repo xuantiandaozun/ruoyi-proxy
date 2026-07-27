@@ -44,7 +44,7 @@ func (c *CLI) ShowConfig() {
 		return
 	}
 
-	fmt.Println("\n\033[1;34m═══ 应用配置 ═══\033[0m\n")
+	fmt.Print("\n\033[1;34m═══ 应用配置 ═══\033[0m\n\n")
 
 	// 代理配置
 	fmt.Println("\033[1;33m代理配置:\033[0m")
@@ -64,7 +64,7 @@ func (c *CLI) ShowConfig() {
 
 // EditConfig 编辑配置
 func (c *CLI) EditConfig() {
-	fmt.Println("\n\033[1;34m═══ 编辑配置 ═══\033[0m\n")
+	fmt.Print("\n\033[1;34m═══ 编辑配置 ═══\033[0m\n\n")
 
 	fmt.Println("选择要编辑的配置:")
 	fmt.Println("  1. SSL邮箱")

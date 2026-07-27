@@ -29,6 +29,15 @@ go.work.sum
 configs/proxy_config.json
 configs/sync_config.json
 configs/app_config.json
+configs/hub_spokes.json
+configs/hub_pending_token.json
+configs/hub_jobs.json
+configs/spoke_profile.json
+configs/database_profiles.json
+configs/database_secrets.json
+configs/scheduler.db
+configs/scheduler.db-shm
+configs/scheduler.db-wal
 
 # JAR 文件（部署的应用）
 *.jar
@@ -55,6 +64,7 @@ tmp/
 temp/
 *.tmp
 .gocache/
+.cache/
 
 # 备份文件
 *.bak

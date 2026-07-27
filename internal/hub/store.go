@@ -30,14 +30,14 @@ type SpokeRecord struct {
 }
 
 type spokeStore struct {
-	mu           sync.RWMutex
-	spokes       map[string]*SpokeRecord
-	pendingToken string
-	pendingExp   time.Time
+	mu            sync.RWMutex
+	spokes        map[string]*SpokeRecord
+	pendingTokens map[string]time.Time
 }
 
 var defaultStore = &spokeStore{
-	spokes: make(map[string]*SpokeRecord),
+	spokes:        make(map[string]*SpokeRecord),
+	pendingTokens: make(map[string]time.Time),
 }
 
 // LoadSpokes 从磁盘加载 spoke 注册表
@@ -90,17 +90,29 @@ func GenerateRegisterToken() (string, error) {
 	exp := time.Now().Add(15 * time.Minute)
 	defaultStore.mu.Lock()
 	defer defaultStore.mu.Unlock()
-	defaultStore.pendingToken = token
-	defaultStore.pendingExp = exp
-	if err := savePendingTokenLocked(token, exp); err != nil {
+	defaultStore.mergePendingTokensLocked()
+	defaultStore.pendingTokens[token] = exp
+	if err := savePendingTokensLocked(); err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
-func savePendingTokenLocked(token string, exp time.Time) error {
-	rec := pendingTokenRecord{Token: token, ExpiresAt: exp}
-	data, err := json.MarshalIndent(rec, "", "  ")
+func savePendingTokensLocked() error {
+	items := make([]pendingTokenRecord, 0, len(defaultStore.pendingTokens))
+	now := time.Now()
+	for token, exp := range defaultStore.pendingTokens {
+		if now.Before(exp) {
+			items = append(items, pendingTokenRecord{Token: token, ExpiresAt: exp})
+		}
+	}
+	if len(items) == 0 {
+		if err := os.Remove(pendingTokenFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -110,41 +122,52 @@ func savePendingTokenLocked(token string, exp time.Time) error {
 	return os.WriteFile(pendingTokenFile, data, 0600)
 }
 
-func loadPendingTokenLocked() (pendingTokenRecord, bool) {
+func loadPendingTokensLocked() map[string]time.Time {
+	items := make(map[string]time.Time)
 	data, err := os.ReadFile(pendingTokenFile)
 	if err != nil {
-		return pendingTokenRecord{}, false
+		return items
 	}
-	var rec pendingTokenRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return pendingTokenRecord{}, false
+	var records []pendingTokenRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		// 兼容旧版单 Token 文件。
+		var legacy pendingTokenRecord
+		if json.Unmarshal(data, &legacy) != nil {
+			return items
+		}
+		records = []pendingTokenRecord{legacy}
 	}
-	if rec.Token == "" || time.Now().After(rec.ExpiresAt) {
-		_ = os.Remove(pendingTokenFile)
-		return pendingTokenRecord{}, false
+	now := time.Now()
+	for _, rec := range records {
+		if rec.Token != "" && now.Before(rec.ExpiresAt) {
+			items[rec.Token] = rec.ExpiresAt
+		}
 	}
-	return rec, true
+	return items
 }
 
-func clearPendingTokenLocked() {
-	defaultStore.pendingToken = ""
-	_ = os.Remove(pendingTokenFile)
+func (s *spokeStore) mergePendingTokensLocked() {
+	if s.pendingTokens == nil {
+		s.pendingTokens = make(map[string]time.Time)
+	}
+	for token, exp := range loadPendingTokensLocked() {
+		s.pendingTokens[token] = exp
+	}
+	now := time.Now()
+	for token, exp := range s.pendingTokens {
+		if !now.Before(exp) {
+			delete(s.pendingTokens, token)
+		}
+	}
 }
 
 func consumeRegisterToken(token string) bool {
 	defaultStore.mu.Lock()
 	defer defaultStore.mu.Unlock()
-
-	if defaultStore.pendingToken != "" && time.Now().Before(defaultStore.pendingExp) {
-		if token == defaultStore.pendingToken {
-			clearPendingTokenLocked()
-			return true
-		}
-	}
-
-	rec, ok := loadPendingTokenLocked()
-	if ok && token == rec.Token {
-		clearPendingTokenLocked()
+	defaultStore.mergePendingTokensLocked()
+	if _, ok := defaultStore.pendingTokens[token]; ok {
+		delete(defaultStore.pendingTokens, token)
+		_ = savePendingTokensLocked()
 		return true
 	}
 	return false
@@ -187,8 +210,12 @@ func ValidateSpokeToken(secret string) (string, bool) {
 			continue
 		}
 		if rec.TokenHash == hash {
-			rec.LastSeen = time.Now()
-			_ = saveSpokesLocked()
+			now := time.Now()
+			persist := now.Sub(rec.LastSeen) >= 30*time.Second
+			rec.LastSeen = now
+			if persist {
+				_ = saveSpokesLocked()
+			}
 			return id, true
 		}
 	}

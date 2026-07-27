@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"ruoyi-proxy/internal/buildinfo"
@@ -13,6 +16,8 @@ import (
 	"ruoyi-proxy/internal/config"
 	"ruoyi-proxy/internal/hub"
 	"ruoyi-proxy/internal/proxy"
+	"ruoyi-proxy/internal/spokecontrol"
+	"ruoyi-proxy/internal/taskruntime"
 )
 
 //go:embed scripts/*
@@ -26,6 +31,10 @@ func main() {
 	if len(os.Args) > 1 {
 		mode = os.Args[1]
 	}
+	if mode == "spoke-agent" {
+		runSpokeAgent()
+		return
+	}
 
 	// Spoke 包默认进入 Agent/CLI；代理必须通过 /proxy-start 显式启动。
 	if mode == "cli" || (mode == "" && buildinfo.IsSpoke()) {
@@ -33,6 +42,14 @@ func main() {
 		return
 	}
 	runProxy()
+}
+
+func runSpokeAgent() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := spokecontrol.RunStandalone(ctx, log.Printf); err != nil {
+		log.Fatalf("Spoke 常驻执行器异常退出: %v", err)
+	}
 }
 
 func runCLI() {
@@ -46,6 +63,11 @@ func runCLI() {
 
 func runProxy() {
 	log.Println("蓝绿代理程序启动中...")
+	go func() {
+		if err := taskruntime.Run(context.Background(), log.Printf); err != nil {
+			log.Printf("AI 定时任务调度器退出: %v", err)
+		}
+	}()
 
 	hubSettings, _ := hub.LoadHubSettings()
 	hubActive := hubSettings.Enabled || buildinfo.IsHub()
@@ -61,6 +83,15 @@ func runProxy() {
 	p, err := proxy.New()
 	if err != nil {
 		log.Fatalf("代理初始化失败: %v", err)
+	}
+
+	// 已运行代理的 Spoke 直接由代理进程领取 Hub 任务，无需额外常驻服务。
+	if buildinfo.IsSpoke() {
+		go func() {
+			if runErr := spokecontrol.RunProxyOwned(context.Background(), log.Printf); runErr != nil {
+				log.Printf("代理内置 Spoke 远程控制退出: %v", runErr)
+			}
+		}()
 	}
 
 	// 启动管理服务器（在后台goroutine中）
@@ -79,6 +110,8 @@ func startProxyServer(p *proxy.Proxy, hubEnabled bool) {
 		proxyMux.HandleFunc("/__hub__/v1/register", hub.RegisterHandler)
 		proxyMux.HandleFunc("/__hub__/v1/profile", hub.ProfileHandler)
 		proxyMux.HandleFunc("/__hub__/v1/chat", hub.ChatHandler)
+		proxyMux.HandleFunc("/__hub__/v1/control/poll", hub.ControlPollHandler)
+		proxyMux.HandleFunc("/__hub__/v1/control/result", hub.ControlResultHandler)
 	}
 
 	proxyServer := &http.Server{
@@ -113,10 +146,12 @@ func startMgmtServer(p *proxy.Proxy, hubEnabled bool) {
 		mgmtMux.HandleFunc("/hub/status", hub.StatusAdminHandler)
 		mgmtMux.HandleFunc("/hub/spoke", hub.SpokeAdminHandler)
 		mgmtMux.HandleFunc("/hub/revoke", hub.RevokeAdminHandler)
+		mgmtMux.HandleFunc("/hub/control", hub.ControlEnqueueAdminHandler)
+		mgmtMux.HandleFunc("/hub/jobs", hub.ControlJobsAdminHandler)
 	}
 
 	mgmtServer := &http.Server{
-		Addr:    config.MgmtPort,
+		Addr:    "127.0.0.1" + config.MgmtPort,
 		Handler: mgmtMux,
 	}
 
