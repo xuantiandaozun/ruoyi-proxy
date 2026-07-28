@@ -6,9 +6,9 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey)](https://github.com)
 
-一个功能完整的蓝绿部署代理服务器，支持零停机部署、HTTPS自动配置、多服务管理、文件同步和 AI 智能运维。
+一个面向多服务器运维的蓝绿部署代理，支持零停机部署、HTTPS 自动配置、多服务管理和 AI 智能运维。
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [Hub AI 网关](#-hub-ai-网关) • [架构设计](#-架构设计) • [贡献指南](#-贡献)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [AI Agent 模式](#-ai-agent-模式) • [Hub AI 网关](#-hub-ai-网关) • [开发路线图](docs/FEATURE_ROADMAP.md) • [贡献指南](#-贡献)
 
 **[🇺🇸 English Documentation](README.md)**
 
@@ -132,7 +132,6 @@ chmod +x ruoyi-proxy-linux
 - ☕ 安装 Java 17（可选）
 - ⚙️ 配置代理程序（端口、目标地址）
 - 🌐 配置域名和 HTTPS
-- 🔄 配置文件同步（可选）
 
 ### 方式二：本地开发
 
@@ -187,8 +186,6 @@ curl http://localhost:8001/status
 # 切换到绿色环境
 curl -X POST "http://localhost:8001/switch?env=green"
 
-# 健康检查
-curl http://localhost:8001/health
 ```
 
 ---
@@ -203,11 +200,15 @@ ruoyi-proxy/
 ├── internal/
 │   ├── agent/          # AI Agent 运维模块（ReAct 引擎、工具、LLM 适配）
 │   ├── cli/            # 交互式 CLI（Agent 为主入口）
-│   ├── config/         # 配置管理
-│   ├── hub/            # Hub AI 网关（注册、转发、Spoke 管理）
-│   ├── proxy/          # 反向代理核心
-│   ├── handler/        # （规划中，暂无代码）
-│   └── sync/           # （规划中，暂无代码）
+│   ├── bootstrap/      # 初始化、自检和 Hub/Spoke 配置引导
+│   ├── commandcatalog/ # CLI 与 AI 共用命令目录
+│   ├── config/         # 代理配置管理
+│   ├── database/       # MySQL 连接档案和受控查询
+│   ├── hub/            # Hub 注册、AI 转发和远程任务
+│   ├── proxy/          # 蓝绿反向代理核心
+│   ├── scheduler/      # SQLite 定时任务和运行审计
+│   ├── spokecontrol/   # Spoke 出站轮询执行器
+│   └── taskruntime/    # 后台 AI 任务运行入口
 ├── configs/            # 配置模板与示例
 │   ├── app_config.example.json   # 应用配置示例（含 ai、hub、jvm）
 │   ├── nginx.conf.template       # Nginx HTTP 模板
@@ -216,7 +217,7 @@ ruoyi-proxy/
 │   ├── init.sh         # 初始化脚本
 │   ├── service.sh      # 服务管理（含 deploy-lowmem）
 │   ├── https.sh        # HTTPS 管理
-│   └── deploy.sh       # 部署脚本
+│   └── configure-nginx.sh # 生成 Nginx 配置
 ├── bin/                # 编译输出目录
 ├── Makefile            # Make 构建脚本
 ├── build.bat           # Windows 构建脚本
@@ -346,12 +347,17 @@ make clean              # 清理编译文件
 # AI 与 Hub
 /agent-config      # 配置 AI 提供商 / Spoke 注册
 /hub-token         # （Hub）生成 Spoke 注册 Token
-/hub-status        # （Hub）查看 Spoke 列表
+/hub-status        # （Hub）查看 Spoke 能力、资源与健康
+/hub-select [id|clear] # 选择远程命令默认节点
+/hub-node-set <id> <key=value...> # 设置分组、标签、维护状态和能力白名单
 /hub-spoke <id>    # （Hub）查看单个 Spoke
 /hub-enable        # 启用 Hub 网关（需重启代理）
 /hub-disable       # 禁用 Hub 网关
 /hub-revoke <id>   # （Hub）吊销 Spoke
 /hub-exec <id> <命令> # （Hub）向 Spoke 下发远程命令
+/hub-action <id[,id]|@组> <动作> [参数] # 单节点、批量或按组下发
+/hub-cancel <job-id> # 取消等待中的任务
+/hub-retry <job-id>  # 重试异常任务
 /hub-jobs [id]     # （Hub）查看远程任务和结果
 /spoke-agent-install # 为不运行代理的 Spoke 安装常驻执行器
 /spoke-agent-status  # 查看远程控制归属或常驻执行器状态
@@ -685,13 +691,21 @@ Spoke 服务器 C ──┘         ▲
                     工具仍在 Spoke 本地执行
 ```
 
-Hub 远程控制不需要连接 Spoke 入站端口。Hub 把命令保存到任务队列，Spoke 每 3 秒通过出站 HTTP 轮询领取并回传结果：
+Hub 远程控制不需要连接 Spoke 入站端口。Hub 把任务保存到队列，Spoke 每 3 秒通过出站 HTTP 轮询领取并回传结果：
 
 ```text
-Hub CLI / AI → Hub 任务队列 ← Spoke 主动轮询 → 本机 Shell
+Hub CLI / AI → Hub 任务队列 ← Spoke 主动轮询 → 结构化执行器 / 受控 Shell
 ```
 
 远程命令始终需要 Hub 用户确认。Hub 管理端只监听 `127.0.0.1:8001`；Spoke 使用注册后的长期凭证访问公开的 `/__hub__/v1/control/*` 接口。
+
+任务支持幂等键、领取租约、取消、重试和只追加生命周期事件。`/hub-action` 可执行服务状态、日志、重启、部署和只读数据库查询，并可用逗号分隔多个 Spoke；每个目标生成独立任务和结果。旧 Worker 不会领取结构化动作。
+
+使用 `/hub-select spoke-xxx` 后，`/hub-exec`、`/hub-action`、`/hub-jobs` 和 `/hub-spoke` 可省略节点 ID，提示符会显示实际选中节点。
+
+Spoke 档案 v3 每分钟刷新 Agent/控制协议版本、能力、CPU、内存、磁盘和服务端点健康。Hub 独立维护节点别名、标签、分组、环境、负责人、维护状态和能力白名单；维护节点不领取任务，结构化动作只有在实时能力与 Hub 白名单同时允许时才会下发。使用 `@分组名` 可按组执行 `/hub-action`。
+
+> **注册信任边界**：`/__hub__/v1/token` 允许 Spoke 匿名领取 15 分钟有效的一次性 Token，这是为了让受信网络中的新节点快速接入。该设计假设 Hub 域名不公开、`/__hub__/` 只对受信网络或受控来源开放；如果域名需要公开，应先在 Nginx、防火墙或 VPN 层增加访问限制。长期凭证仍可由 Hub 使用 `/hub-revoke` 吊销。
 
 ### 部署步骤
 
@@ -757,9 +771,12 @@ systemctl restart ruoyi-proxy
 | `/__hub__/v1/control/poll` | 8000（代理） | Spoke 领取远程任务 |
 | `/__hub__/v1/control/result` | 8000（代理） | Spoke 回传执行结果 |
 | `/hub/token` | 8001（管理） | 管理端生成 Token |
-| `/hub/status` | 8001（管理） | Spoke 列表 |
+| `/hub/status` | 8001（管理） | Spoke 列表，可用 `group` 参数筛选 |
+| `/hub/spoke/governance` | 8001（管理） | 部分更新节点治理字段 |
 | `/hub/revoke` | 8001（管理） | 吊销 Spoke |
-| `/hub/control` | 8001（管理） | Hub 本机创建远程任务 |
+| `/hub/control` | 8001（管理） | 创建单节点、批量或结构化远程任务 |
+| `/hub/control/cancel` | 8001（管理） | 取消等待中的任务 |
+| `/hub/control/retry` | 8001（管理） | 重试失败、超时或已取消任务 |
 | `/hub/jobs` | 8001（管理） | Hub 本机查询任务和结果 |
 
 > Hub 需在 Nginx 配置 `location ^~ /__hub__/` 转发到代理端口；可用 `/self-check` 自检，或用 `/fix-nginx-hub` 让 AI 辅助修复。
@@ -831,7 +848,7 @@ sudo systemctl status ruoyi-proxy
 
 ```bash
 # 定期健康检查
-*/5 * * * * curl -sf http://localhost:8001/health || echo "Service down" | mail -s "Alert" admin@example.com
+*/5 * * * * curl -sf http://localhost:8001/status || echo "Proxy down" | mail -s "Alert" admin@example.com
 
 # 日志监控
 tail -f /var/log/ruoyi-proxy.log
@@ -969,7 +986,7 @@ netstat -tlnp | grep 8001
 1. **单一职责** - 每个包只负责一个明确的功能
 2. **依赖注入** - 通过参数传递依赖，便于测试
 3. **配置驱动** - 所有配置通过文件管理，易于维护
-4. **并发安全** - 使用 `atomic.Value` 保证线程安全
+4. **并发安全** - 使用 `sync.RWMutex` 保护代理配置和路由状态
 5. **错误处理** - 完善的日志记录和错误返回
 
 ### 性能优化

@@ -21,15 +21,17 @@ type ServiceProxy struct {
 
 // Proxy 多服务代理结构
 type Proxy struct {
-	mu       sync.RWMutex
-	config   *config.Config
-	services map[string]*ServiceProxy // key: serviceID
+	mu         sync.RWMutex
+	config     *config.Config
+	services   map[string]*ServiceProxy // key: serviceID
+	saveConfig func(*config.Config) error
 }
 
 // New 初始化代理
 func New() (*Proxy, error) {
 	p := &Proxy{
-		services: make(map[string]*ServiceProxy),
+		services:   make(map[string]*ServiceProxy),
+		saveConfig: config.SaveConfig,
 	}
 
 	// 加载初始配置
@@ -90,65 +92,34 @@ func createProxy(target string) (*httputil.ReverseProxy, error) {
 	return proxy, nil
 }
 
+// routeSnapshot 单次请求使用的不可变路由快照。
+type routeSnapshot struct {
+	serviceID string
+	activeEnv string
+	proxy     *httputil.ReverseProxy
+}
+
 // HandleProxy 代理请求处理（根据URL路径识别服务）
 // 路由规则: /api/{serviceID}/... -> 对应服务
 func (p *Proxy) HandleProxy(w http.ResponseWriter, r *http.Request) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	// 解析服务ID，格式: /api/{serviceID}/...
-	serviceID := p.extractServiceID(r.URL.Path)
-
-	svcCfg := p.config.GetService(serviceID)
-	if svcCfg == nil {
-		// 如果未匹配到特定服务，回退到默认服务
-		serviceID = "default"
-		svcCfg = p.config.Services["default"]
-	}
-
-	if svcCfg == nil {
-		// 如果连默认服务都没有（配置严重错误），尝试降级到任意一个可用服务
-		for id := range p.config.Services {
-			serviceID = id
-			svcCfg = p.config.Services[id]
-			break
-		}
-	}
-
-	if svcCfg == nil {
-		http.Error(w, "未配置服务", http.StatusNotFound)
+	route, status, err := p.resolveRoute(r.URL.Path)
+	if err != nil {
+		http.Error(w, err.Error(), status)
 		return
 	}
 
-	sp := p.services[serviceID]
-	if sp == nil {
-		http.Error(w, "服务未初始化", http.StatusInternalServerError)
-		return
-	}
-
-	var proxy *httputil.ReverseProxy
-	switch svcCfg.ActiveEnv {
-	case "green":
-		proxy = sp.GreenProxy
-	default:
-		proxy = sp.BlueProxy
-	}
-
-	// 如果是通过URL路径匹配到的特定服务（非default回退），需要去除服务ID前缀
+	// 如果是通过URL路径匹配到的特定服务（非default回退），需要去除服务ID前缀。
 	// 例如: /api/collect/list -> /api/list (假设collect是服务ID)
-	if svcCfg != nil && serviceID != "default" {
-		// 简单的路径重写逻辑
-		// 1. 处理 /api/{serviceID} 的情况
-		prefixApi := "/api/" + serviceID
-		if strings.HasPrefix(r.URL.Path, prefixApi) {
-			newPath := "/api" + strings.TrimPrefix(r.URL.Path, prefixApi)
+	if route.serviceID != "default" {
+		prefixAPI := "/api/" + route.serviceID
+		if strings.HasPrefix(r.URL.Path, prefixAPI) {
+			newPath := "/api" + strings.TrimPrefix(r.URL.Path, prefixAPI)
 			r.URL.Path = newPath
 			if r.URL.RawPath != "" {
-				r.URL.RawPath = "/api" + strings.TrimPrefix(r.URL.RawPath, prefixApi)
+				r.URL.RawPath = "/api" + strings.TrimPrefix(r.URL.RawPath, prefixAPI)
 			}
 		} else {
-			// 2. 处理 /{serviceID} 的情况
-			prefixRoot := "/" + serviceID
+			prefixRoot := "/" + route.serviceID
 			if strings.HasPrefix(r.URL.Path, prefixRoot) {
 				newPath := strings.TrimPrefix(r.URL.Path, prefixRoot)
 				if !strings.HasPrefix(newPath, "/") {
@@ -156,31 +127,66 @@ func (p *Proxy) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				}
 				r.URL.Path = newPath
 				if r.URL.RawPath != "" {
-					// 简单处理RawPath，实际场景可能需要更复杂的转义处理
 					r.URL.RawPath = newPath
 				}
 			}
 		}
-		log.Printf("[Proxy] Rewriting Path for service %s: %s -> %s", serviceID, r.RequestURI, r.URL.Path)
+		log.Printf("[Proxy] Rewriting Path for service %s: %s -> %s", route.serviceID, r.RequestURI, r.URL.Path)
 	}
 
-	// 添加调试头
-	r.Header.Set("X-Proxy-Service", serviceID)
-	r.Header.Set("X-Proxy-Env", svcCfg.ActiveEnv)
+	r.Header.Set("X-Proxy-Service", route.serviceID)
+	r.Header.Set("X-Proxy-Env", route.activeEnv)
 	r.Header.Set("X-Proxy-Time", time.Now().Format("2006-01-02 15:04:05"))
 
-	proxy.ServeHTTP(w, r)
+	// 上游请求可能是 SSE/WebSocket 或其他长连接，不能在此期间持有配置读锁。
+	route.proxy.ServeHTTP(w, r)
 }
 
-// extractServiceID 从路径提取服务ID
+// resolveRoute 在读锁内解析并复制当前请求需要的路由状态。
+func (p *Proxy) resolveRoute(path string) (routeSnapshot, int, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	serviceID := p.extractServiceIDLocked(path)
+	svcCfg := p.config.GetService(serviceID)
+	if svcCfg == nil {
+		serviceID = "default"
+		svcCfg = p.config.Services["default"]
+	}
+	if svcCfg == nil {
+		for id, candidate := range p.config.Services {
+			serviceID = id
+			svcCfg = candidate
+			break
+		}
+	}
+	if svcCfg == nil {
+		return routeSnapshot{}, http.StatusNotFound, fmt.Errorf("未配置服务")
+	}
+
+	serviceProxy := p.services[serviceID]
+	if serviceProxy == nil {
+		return routeSnapshot{}, http.StatusInternalServerError, fmt.Errorf("服务未初始化")
+	}
+
+	target := serviceProxy.BlueProxy
+	if svcCfg.ActiveEnv == "green" {
+		target = serviceProxy.GreenProxy
+	}
+	if target == nil {
+		return routeSnapshot{}, http.StatusInternalServerError, fmt.Errorf("目标代理未初始化")
+	}
+	return routeSnapshot{serviceID: serviceID, activeEnv: svcCfg.ActiveEnv, proxy: target}, http.StatusOK, nil
+}
+
+// extractServiceIDLocked 从路径提取服务ID，调用方必须持有读锁或写锁。
 // 支持格式: /api/{serviceID}/... 或 /{serviceID}/...
-func (p *Proxy) extractServiceID(path string) string {
+func (p *Proxy) extractServiceIDLocked(path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) >= 2 && parts[0] == "api" {
 		return parts[1]
 	}
 	if len(parts) >= 1 {
-		// 检查第一段是否是已知服务
 		if _, ok := p.config.Services[parts[0]]; ok {
 			return parts[0]
 		}
@@ -190,60 +196,84 @@ func (p *Proxy) extractServiceID(path string) string {
 
 // SwitchService 切换指定服务的环境
 func (p *Proxy) SwitchService(serviceID, env string) error {
+	if !isValidEnvironment(env) {
+		return fmt.Errorf("无效环境: %s", env)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	svc := p.config.GetService(serviceID)
+	candidate := p.config.Clone()
+	svc := candidate.GetService(serviceID)
 	if svc == nil {
 		return fmt.Errorf("服务不存在: %s", serviceID)
 	}
-
 	svc.ActiveEnv = env
-	return config.SaveConfig(p.config)
+	if err := p.saveConfigLocked(candidate); err != nil {
+		return err
+	}
+	p.config = candidate
+	return nil
 }
 
 // SwitchAll 切换所有服务的环境
 func (p *Proxy) SwitchAll(env string) error {
+	if !isValidEnvironment(env) {
+		return fmt.Errorf("无效环境: %s", env)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for _, svc := range p.config.Services {
-		svc.ActiveEnv = env
+	candidate := p.config.Clone()
+	for _, svc := range candidate.Services {
+		if svc != nil {
+			svc.ActiveEnv = env
+		}
 	}
-	return config.SaveConfig(p.config)
+	if err := p.saveConfigLocked(candidate); err != nil {
+		return err
+	}
+	p.config = candidate
+	return nil
 }
 
 // AddService 添加新服务
 func (p *Proxy) AddService(serviceID string, svcCfg *config.ServiceConfig) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// 检查服务是否已存在
-	if _, exists := p.config.Services[serviceID]; exists {
-		return fmt.Errorf("服务[%s]已存在", serviceID)
+	if svcCfg == nil {
+		return fmt.Errorf("服务配置不能为空")
 	}
 
-	// 创建代理
-	sp := &ServiceProxy{}
+	serviceProxy := &ServiceProxy{}
 	var err error
-
-	sp.BlueProxy, err = createProxy(svcCfg.BlueTarget)
+	serviceProxy.BlueProxy, err = createProxy(svcCfg.BlueTarget)
 	if err != nil {
 		return fmt.Errorf("创建蓝色代理失败: %v", err)
 	}
-
-	sp.GreenProxy, err = createProxy(svcCfg.GreenTarget)
+	serviceProxy.GreenProxy, err = createProxy(svcCfg.GreenTarget)
 	if err != nil {
 		return fmt.Errorf("创建绿色代理失败: %v", err)
 	}
 
-	p.config.Services[serviceID] = svcCfg
-	p.services[serviceID] = sp
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.config.Services[serviceID]; exists {
+		return fmt.Errorf("服务[%s]已存在", serviceID)
+	}
 
-	log.Printf("服务[%s](%s) 已添加 - 蓝: %s, 绿: %s",
-		serviceID, svcCfg.Name, svcCfg.BlueTarget, svcCfg.GreenTarget)
+	candidate := p.config.Clone()
+	serviceCopy := *svcCfg
+	candidate.Services[serviceID] = &serviceCopy
+	if err := p.saveConfigLocked(candidate); err != nil {
+		return err
+	}
 
-	return config.SaveConfig(p.config)
+	newServices := cloneServiceProxies(p.services)
+	newServices[serviceID] = serviceProxy
+	p.config = candidate
+	p.services = newServices
+	log.Printf("服务[%s](%s) 已添加 - 蓝: %s, 绿: %s", serviceID, svcCfg.Name, svcCfg.BlueTarget, svcCfg.GreenTarget)
+	return nil
 }
 
 // RemoveService 删除服务
@@ -254,54 +284,88 @@ func (p *Proxy) RemoveService(serviceID string) error {
 	if _, exists := p.config.Services[serviceID]; !exists {
 		return fmt.Errorf("服务[%s]不存在", serviceID)
 	}
-
-	// 确保至少保留一个服务
 	if len(p.config.Services) <= 1 {
 		return fmt.Errorf("至少需要保留一个服务")
 	}
 
-	delete(p.config.Services, serviceID)
-	delete(p.services, serviceID)
+	candidate := p.config.Clone()
+	delete(candidate.Services, serviceID)
+	if err := p.saveConfigLocked(candidate); err != nil {
+		return err
+	}
 
+	newServices := cloneServiceProxies(p.services)
+	delete(newServices, serviceID)
+	p.config = candidate
+	p.services = newServices
 	log.Printf("服务[%s] 已删除", serviceID)
-
-	return config.SaveConfig(p.config)
+	return nil
 }
 
-// GetConfig 获取当前配置
+// GetConfig 获取当前配置的深拷贝。
 func (p *Proxy) GetConfig() *config.Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.config
+	return p.config.Clone()
 }
 
 // UpdateConfig 更新配置并重建代理
 func (p *Proxy) UpdateConfig(cfg *config.Config) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if cfg == nil {
+		return fmt.Errorf("代理配置不能为空")
+	}
+	candidate := cfg.Clone()
 
-	// 为新配置中的服务创建代理
-	newServices := make(map[string]*ServiceProxy)
-	for serviceID, svcCfg := range cfg.Services {
-		sp := &ServiceProxy{}
+	newServices := make(map[string]*ServiceProxy, len(candidate.Services))
+	for serviceID, svcCfg := range candidate.Services {
+		if svcCfg == nil {
+			return fmt.Errorf("服务[%s]配置不能为空", serviceID)
+		}
+		serviceProxy := &ServiceProxy{}
 		var err error
-
-		sp.BlueProxy, err = createProxy(svcCfg.BlueTarget)
+		serviceProxy.BlueProxy, err = createProxy(svcCfg.BlueTarget)
 		if err != nil {
 			return fmt.Errorf("创建服务[%s]蓝色代理失败: %v", serviceID, err)
 		}
-
-		sp.GreenProxy, err = createProxy(svcCfg.GreenTarget)
+		serviceProxy.GreenProxy, err = createProxy(svcCfg.GreenTarget)
 		if err != nil {
 			return fmt.Errorf("创建服务[%s]绿色代理失败: %v", serviceID, err)
 		}
-
-		newServices[serviceID] = sp
-		log.Printf("服务[%s](%s) 代理已重建", serviceID, svcCfg.Name)
+		newServices[serviceID] = serviceProxy
 	}
 
-	p.config = cfg
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.saveConfigLocked(candidate); err != nil {
+		return err
+	}
+	p.config = candidate
 	p.services = newServices
+	for serviceID, svcCfg := range candidate.Services {
+		log.Printf("服务[%s](%s) 代理已重建", serviceID, svcCfg.Name)
+	}
+	return nil
+}
 
-	return config.SaveConfig(cfg)
+func (p *Proxy) saveConfigLocked(cfg *config.Config) error {
+	save := p.saveConfig
+	if save == nil {
+		save = config.SaveConfig
+	}
+	if err := save(cfg); err != nil {
+		return fmt.Errorf("保存代理配置失败: %v", err)
+	}
+	return nil
+}
+
+func cloneServiceProxies(source map[string]*ServiceProxy) map[string]*ServiceProxy {
+	cloned := make(map[string]*ServiceProxy, len(source))
+	for id, serviceProxy := range source {
+		cloned[id] = serviceProxy
+	}
+	return cloned
+}
+
+func isValidEnvironment(env string) bool {
+	return env == "blue" || env == "green"
 }

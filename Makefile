@@ -1,7 +1,8 @@
 .PHONY: build linux run clean install cli sync linux-hub linux-spoke build-hub build-spoke
 
-LDFLAGS = -s -w
 BUILD_PKG = ruoyi-proxy/internal/buildinfo
+BUILD_VERSION ?= dev
+LDFLAGS = -s -w -X $(BUILD_PKG).Version=$(BUILD_VERSION)
 
 # 同步脚本和配置到 cmd/proxy/（编译前必须执行）
 sync:

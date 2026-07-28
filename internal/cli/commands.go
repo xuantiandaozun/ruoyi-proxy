@@ -1083,14 +1083,24 @@ func (c *CLI) printHubStatusList(count int, spokes []hub.SpokeRecord) {
 	fmt.Printf("\n\033[1;34m已注册 Spoke (%d)\033[0m\n", count)
 	for _, s := range spokes {
 		status := spokeActivityStatus(s, time.Now())
+		displayID := s.ID
+		if s.Alias != "" {
+			displayID += " (" + s.Alias + ")"
+		}
 		fmt.Printf("  \033[1;36m%s\033[0m  [%s]  创建: %s  最近: %s\n",
-			s.ID, status, s.CreatedAt.Format("2006-01-02 15:04"), s.LastSeen.Format("2006-01-02 15:04"))
+			displayID, status, s.CreatedAt.Format("2006-01-02 15:04"), s.LastSeen.Format("2006-01-02 15:04"))
+		if s.Group != "" || s.Environment != "" || s.Owner != "" {
+			fmt.Printf("      治理: 分组=%s 环境=%s 负责人=%s\n", s.Group, s.Environment, s.Owner)
+		}
+		if len(s.Tags) > 0 {
+			fmt.Printf("      标签: %s\n", strings.Join(s.Tags, ", "))
+		}
 		if s.Profile != nil {
 			p := s.Profile
 			if p.SchemaVersion == 0 {
 				fmt.Printf("      档案: 旧版（升级 Spoke 后将自动补全）\n")
 			} else {
-				fmt.Printf("      档案版本: v%d\n", p.SchemaVersion)
+				fmt.Printf("      档案: v%d  Agent=%s  控制协议=v%d  健康=%s\n", p.SchemaVersion, p.AgentVersion, p.ControlProtocol, p.Health.Status)
 			}
 			label := p.Label
 			if label == "" {
@@ -1127,6 +1137,16 @@ func (c *CLI) printHubSpokeDetail(s hub.SpokeRecord) {
 	fmt.Printf("  状态: %s\n", status)
 	fmt.Printf("  创建: %s\n", s.CreatedAt.Format("2006-01-02 15:04:05"))
 	fmt.Printf("  最近: %s\n", s.LastSeen.Format("2006-01-02 15:04:05"))
+	if s.Alias != "" {
+		fmt.Printf("  Hub 别名: %s\n", s.Alias)
+	}
+	fmt.Printf("  治理: 分组=%s 环境=%s 负责人=%s 维护=%v\n", s.Group, s.Environment, s.Owner, s.Maintenance)
+	if len(s.Tags) > 0 {
+		fmt.Printf("  标签: %s\n", strings.Join(s.Tags, ", "))
+	}
+	if len(s.AllowedCapabilities) > 0 {
+		fmt.Printf("  能力白名单: %s\n", strings.Join(s.AllowedCapabilities, ", "))
+	}
 	if s.Profile == nil {
 		fmt.Println("  档案: 未上报（请在 Spoke 端重新运行 /agent-config 或重启 CLI 触发引导）")
 		fmt.Println()
@@ -1137,6 +1157,19 @@ func (c *CLI) printHubSpokeDetail(s hub.SpokeRecord) {
 		fmt.Println("  档案版本: 旧版（升级 Spoke 后将自动补全）")
 	} else {
 		fmt.Printf("  档案版本: v%d\n", p.SchemaVersion)
+	}
+	fmt.Printf("  Agent: %s  控制协议: v%d\n", p.AgentVersion, p.ControlProtocol)
+	if len(p.Capabilities) > 0 {
+		fmt.Printf("  上报能力: %s\n", strings.Join(p.Capabilities, ", "))
+	}
+	if p.Health.Status != "" {
+		fmt.Printf("  业务健康: %s（%s）\n", p.Health.Status, p.Health.Summary)
+	}
+	if p.Resources.CPUCount > 0 {
+		fmt.Printf("  资源: CPU=%d 内存=%s/%s可用 磁盘=%s/%s可用\n",
+			p.Resources.CPUCount,
+			formatByteSize(p.Resources.MemoryAvailableBytes), formatByteSize(p.Resources.MemoryTotalBytes),
+			formatByteSize(p.Resources.DiskFreeBytes), formatByteSize(p.Resources.DiskTotalBytes))
 	}
 	label := p.Label
 	if label == "" {
@@ -1174,7 +1207,7 @@ func (c *CLI) printHubSpokeDetail(s hub.SpokeRecord) {
 	if len(p.Services) > 0 {
 		fmt.Println("  服务:")
 		for _, svc := range p.Services {
-			fmt.Printf("    - %s  %s  %s  %s\n", svc.ID, svc.Name, svc.ProjectType, svc.ActiveEnv)
+			fmt.Printf("    - %s  %s  %s  %s  %s  %s\n", svc.ID, svc.Name, svc.ProjectType, svc.ActiveEnv, svc.Health, svc.Endpoint)
 		}
 	}
 	fmt.Println()
@@ -1183,6 +1216,9 @@ func (c *CLI) printHubSpokeDetail(s hub.SpokeRecord) {
 func spokeActivityStatus(s hub.SpokeRecord, now time.Time) string {
 	if s.Revoked {
 		return "已吊销"
+	}
+	if s.Maintenance {
+		return "维护"
 	}
 	if s.LastSeen.IsZero() {
 		return "从未连接"
@@ -1225,18 +1261,27 @@ func (c *CLI) handleHubRevoke(spokeID string) {
 }
 
 func (c *CLI) handleHubExec(args []string) {
-	if len(args) < 2 {
-		c.printError("用法: /hub-exec <spoke-id> <命令>")
+	spokeID := c.selectedSpoke
+	commandArgs := args
+	if len(args) >= 2 && strings.HasPrefix(strings.TrimSpace(args[0]), "spoke-") {
+		spokeID = strings.TrimSpace(args[0])
+		commandArgs = args[1:]
+	}
+	if spokeID == "" || len(commandArgs) == 0 {
+		c.printError("用法: /hub-exec <spoke-id> <命令>；或先 /hub-select 后执行 /hub-exec <命令>")
 		return
 	}
-	spokeID := strings.TrimSpace(args[0])
-	command := strings.TrimSpace(strings.Join(args[1:], " "))
+	command := strings.TrimSpace(strings.Join(commandArgs, " "))
 	if !c.confirmDangerAction("在 "+spokeID+" 执行远程命令", []string{command, "命令由 Spoke 主动领取，结果记录在 Hub 审计日志"}) {
 		return
 	}
 	payload, err := json.Marshal(map[string]interface{}{
-		"spoke_id": spokeID,
-		"command":  command,
+		"spoke_id":     spokeID,
+		"command":      command,
+		"actor":        "local-user",
+		"source":       "cli",
+		"confirmed_by": "local-user",
+		"confirmed_at": time.Now(),
 	})
 	if err != nil {
 		c.printError(fmt.Sprintf("编码任务失败: %v", err))
@@ -1293,7 +1338,15 @@ func (c *CLI) handleHubJobs(spokeID string) {
 	}
 	for _, job := range out.Jobs {
 		fmt.Printf("  \033[1;36m%s\033[0m  %-10s  %s  %s\n", job.ID, job.Status, job.SpokeID, job.CreatedAt.Format("01-02 15:04:05"))
-		fmt.Printf("      $ %s\n", sanitizeTerminalText(job.Command))
+		if job.Action != nil {
+			actionJSON, _ := json.Marshal(job.Action)
+			fmt.Printf("      动作: %s\n", sanitizeTerminalText(string(actionJSON)))
+		} else {
+			fmt.Printf("      $ %s\n", sanitizeTerminalText(job.Command))
+		}
+		if job.BatchID != "" {
+			fmt.Printf("      批次: %s\n", sanitizeTerminalText(job.BatchID))
+		}
 		if job.Output != "" {
 			fmt.Printf("      输出: %s\n", strings.TrimSpace(sanitizeTerminalText(job.Output)))
 		}
@@ -1304,6 +1357,44 @@ func (c *CLI) handleHubJobs(spokeID string) {
 	fmt.Println()
 }
 
+func (c *CLI) handleHubJobMutation(action string, args []string) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		c.printError(fmt.Sprintf("用法: /hub-%s <job-id>", action))
+		return
+	}
+	jobID := strings.TrimSpace(args[0])
+	description := "取消远程任务 " + jobID
+	details := []string{"仅等待 Spoke 领取的任务可以取消"}
+	if action == "retry" {
+		description = "重试远程任务 " + jobID
+		details = []string{"原任务命令将由目标 Spoke 再次执行"}
+	}
+	if !c.confirmDangerAction(description, details) {
+		return
+	}
+	payload, err := json.Marshal(map[string]string{"job_id": jobID})
+	if err != nil {
+		c.printError(fmt.Sprintf("编码任务请求失败: %v", err))
+		return
+	}
+	resp, err := http.Post(mgmtBaseURL()+"/hub/control/"+action, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		c.printError(fmt.Sprintf("更新远程任务失败: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
+	if resp.StatusCode != http.StatusOK {
+		c.printError(fmt.Sprintf("更新远程任务失败 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
+		return
+	}
+	var job hub.ControlJob
+	if err := json.Unmarshal(body, &job); err != nil {
+		c.printError(fmt.Sprintf("解析任务响应失败: %v", err))
+		return
+	}
+	c.printSuccess(fmt.Sprintf("任务 %s 已更新为 %s", job.ID, job.Status))
+}
 func sanitizeTerminalText(value string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' || r >= 0x20 {

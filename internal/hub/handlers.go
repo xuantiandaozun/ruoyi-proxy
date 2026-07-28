@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,10 +42,23 @@ type controlResultRequest struct {
 }
 
 type controlEnqueueRequest struct {
-	SpokeID     string `json:"spoke_id"`
-	Command     string `json:"command"`
-	WorkDir     string `json:"workdir,omitempty"`
-	TimeoutSecs int    `json:"timeout_seconds,omitempty"`
+	SpokeID        string         `json:"spoke_id"`
+	SpokeIDs       []string       `json:"spoke_ids,omitempty"`
+	Group          string         `json:"group,omitempty"`
+	Command        string         `json:"command"`
+	Action         *ControlAction `json:"action,omitempty"`
+	WorkDir        string         `json:"workdir,omitempty"`
+	TimeoutSecs    int            `json:"timeout_seconds,omitempty"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+	MaxAttempts    int            `json:"max_attempts,omitempty"`
+	Actor          string         `json:"actor,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	ConfirmedBy    string         `json:"confirmed_by,omitempty"`
+	ConfirmedAt    time.Time      `json:"confirmed_at,omitempty"`
+}
+
+type controlMutationRequest struct {
+	JobID string `json:"job_id"`
 }
 
 // RegisterHandler POST /__hub__/v1/register
@@ -217,7 +231,9 @@ func ControlPollHandler(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	job, err := ClaimControlJob(spokeID)
+	protocolVersion, _ := strconv.Atoi(strings.TrimSpace(r.Header.Get("X-Ruoyi-Control-Version")))
+	capabilities := splitControlCapabilities(r.Header.Get("X-Ruoyi-Capabilities"))
+	job, err := ClaimControlJobWithCapabilities(spokeID, protocolVersion, capabilities)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -245,7 +261,13 @@ func ControlResultHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无效请求体", http.StatusBadRequest)
 		return
 	}
-	if err := CompleteControlJob(spokeID, req.JobID, req.Status, req.Output, req.Error); err != nil {
+	var err error
+	if req.Status == ControlJobRunning {
+		err = StartControlJob(spokeID, req.JobID)
+	} else {
+		err = CompleteControlJob(spokeID, req.JobID, req.Status, req.Output, req.Error)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -264,13 +286,90 @@ func ControlEnqueueAdminHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无效请求体", http.StatusBadRequest)
 		return
 	}
-	job, err := EnqueueControlJob(req.SpokeID, req.Command, req.WorkDir, req.TimeoutSecs)
+	options := ControlJobOptions{
+		IdempotencyKey: req.IdempotencyKey,
+		MaxAttempts:    req.MaxAttempts,
+		Action:         req.Action,
+		Actor:          req.Actor,
+		Source:         req.Source,
+		ConfirmedBy:    req.ConfirmedBy,
+		ConfirmedAt:    req.ConfirmedAt,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if strings.TrimSpace(req.Group) != "" {
+		records := ListSpokesByGroup(req.Group)
+		if len(records) == 0 {
+			http.Error(w, "节点分组不存在或没有可用节点: "+strings.TrimSpace(req.Group), http.StatusBadRequest)
+			return
+		}
+		targets := make([]string, 0, len(records))
+		for _, record := range records {
+			if !record.Maintenance {
+				targets = append(targets, record.ID)
+			}
+		}
+		if len(targets) == 0 {
+			http.Error(w, "节点分组中的节点均处于维护状态: "+strings.TrimSpace(req.Group), http.StatusBadRequest)
+			return
+		}
+		batch, err := EnqueueControlJobBatch(targets, req.Command, req.WorkDir, req.TimeoutSecs, options)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(batch)
+		return
+	}
+	if len(req.SpokeIDs) > 0 {
+		batch, err := EnqueueControlJobBatch(req.SpokeIDs, req.Command, req.WorkDir, req.TimeoutSecs, options)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(batch)
+		return
+	}
+	job, err := EnqueueControlJobWithOptions(req.SpokeID, req.Command, req.WorkDir, req.TimeoutSecs, options)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+// ControlCancelAdminHandler POST /hub/control/cancel — Hub 本机取消等待中的任务。
+func ControlCancelAdminHandler(w http.ResponseWriter, r *http.Request) {
+	handleControlMutation(w, r, CancelControlJob)
+}
+
+// ControlRetryAdminHandler POST /hub/control/retry — Hub 本机重试已结束的异常任务。
+func ControlRetryAdminHandler(w http.ResponseWriter, r *http.Request) {
+	handleControlMutation(w, r, RetryControlJob)
+}
+
+func handleControlMutation(w http.ResponseWriter, r *http.Request, mutate func(string) (ControlJob, error)) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只允许 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var req controlMutationRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+		http.Error(w, "无效请求体", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.JobID) == "" {
+		http.Error(w, "job_id 不能为空", http.StatusBadRequest)
+		return
+	}
+	job, err := mutate(req.JobID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(job)
 }
 
@@ -289,6 +388,15 @@ func ControlJobsAdminHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"count": len(items), "jobs": items})
 }
 
+func splitControlCapabilities(value string) []string {
+	var capabilities []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			capabilities = append(capabilities, item)
+		}
+	}
+	return capabilities
+}
 func authenticateSpoke(w http.ResponseWriter, r *http.Request) (string, bool) {
 	secret := bearerToken(r)
 	if secret == "" {
@@ -343,6 +451,9 @@ func StatusAdminHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := ListSpokes()
+	if group := strings.TrimSpace(r.URL.Query().Get("group")); group != "" {
+		items = ListSpokesByGroup(group)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"count":  len(items),
@@ -369,6 +480,31 @@ func SpokeAdminHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(item)
+}
+
+// SpokeGovernanceAdminHandler POST /hub/spoke/governance?spoke=<id>
+func SpokeGovernanceAdminHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "只允许 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	spokeID := strings.TrimSpace(r.URL.Query().Get("spoke"))
+	if spokeID == "" {
+		http.Error(w, "缺少 spoke 参数", http.StatusBadRequest)
+		return
+	}
+	var patch SpokeGovernancePatch
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&patch); err != nil {
+		http.Error(w, "无效请求体", http.StatusBadRequest)
+		return
+	}
+	record, err := PatchSpokeGovernance(spokeID, patch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(record)
 }
 
 // RevokeAdminHandler POST /hub/revoke?spoke=<id>

@@ -7,7 +7,7 @@ HTTPS auto-configuration, multi-service management, and an AI agent mode (ReAct 
 
 - **Language**: Go 1.24.1+
 - **Module**: `ruoyi-proxy`
-- **Entry point**: `cmd/proxy/main.go` (two modes: CLI `go run . cli` or proxy server `go run .`)
+- **Entry point**: `cmd/proxy/main.go` (proxy server, interactive `cli`, and standalone `spoke-agent` modes)
 
 ## Build Commands
 
@@ -29,7 +29,7 @@ make cli            # Dev CLI:  go run cmd/proxy/main.go cli
 
 ## Testing
 
-No test files exist yet. Use `go test -v ./...` or `go test -v -run TestX ./path/to/package`.
+Unit tests exist for Agent boundaries, Hub compatibility/control, database discovery and SQL classification, scheduler storage, CLI catalog, bootstrap migration, and Spoke ownership. Use `go test -v ./...` for the full suite or `go test -v -run TestX ./path/to/package` for a focused test.
 
 ## File Organization
 
@@ -46,7 +46,7 @@ ruoyi-proxy/
 │   │   ├── provider.go      #   Provider interface + factory (openai/anthropic/ollama)
 │   │   ├── openai.go        #   OpenAI-compatible streaming adapter
 │   │   ├── anthropic.go     #   Anthropic streaming adapter
-│   │   ├── tools.go         #   Tool definitions + executor (14 tools, backup logic)
+│   │   ├── tools.go         #   Core tool definitions + executor and backup logic
 │   │   ├── config.go        #   AIConfig load/save from app_config.json
 │   │   ├── context.go       #   Message history with token budget
 │   │   └── mdstream.go      #   Stream markdown → terminal (glamour)
@@ -55,21 +55,21 @@ ruoyi-proxy/
 │   │   ├── commands.go      #   Agent start, status, deploy, etc.
 │   │   ├── config.go        #   Config display/edit, HTTPS enable/disable
 │   │   └── embed.go         #   Embedded FS injection from main
+│   ├── bootstrap/           # Initialization, self-check, Hub/Spoke profile setup
+│   ├── commandcatalog/      # Shared slash-command metadata for CLI and AI
 │   ├── config/              # Proxy config types + load/save
-│   │   └── config.go        #   ServiceConfig, Config, LoadConfig, SaveConfig
-│   ├── proxy/               # Reverse proxy (blue-green routing)
-│   │   └── proxy.go         #   Path-based service routing, env switching
-│   ├── handler/             # (planned, currently empty)
-│   └── sync/                # (planned, currently empty)
+│   ├── database/            # MySQL profiles, discovery, schema and controlled queries
+│   ├── hub/                 # Registration, AI relay, profiles and remote jobs
+│   ├── proxy/               # Reverse proxy and blue-green routing
+│   ├── scheduler/           # SQLite task store, leases and run audit
+│   ├── spokecontrol/        # Outbound Spoke remote-control worker
+│   └── taskruntime/         # Background scheduled Agent runtime
 ├── scripts/                 # Source shell scripts (service.sh, init.sh, https.sh, etc.)
 ├── configs/                 # Source configs + nginx templates
 ├── bin/                     # Build output (gitignored)
 ├── build.bat                # Windows build script
 └── Makefile
 ```
-
-**Key fact**: `internal/handler/` and `internal/sync/` are empty — they are planned but have no code.
-Do not add import references to them.
 
 ## Build Flow & Embed Mechanics
 
@@ -87,7 +87,6 @@ These are generated at runtime, **never commit them**:
 ```
 configs/proxy_config.json    # Multi-service proxy targets + active env
 configs/app_config.json      # Domain, HTTPS, JVM presets, AI provider config
-configs/sync_config.json     # File sync settings
 ```
 
 ## Code Conventions
@@ -105,13 +104,15 @@ configs/sync_config.json     # File sync settings
 - ReAct loop: think (LLM stream) → act (execute tools) → observe (feed results back), up to 30 rounds
 - Auto-resume: up to 5 continuation injections (150 effective rounds max)
 - Write tools require confirmation UI unless user already approved this turn
-- `run_shell` with read-only commands (ls, cat, grep, systemctl status, etc.) skips confirmation
+- `run_shell` skips confirmation only for a single allowlisted read-only command; compound Shell syntax and write-capable query options always require confirmation
 - Important files auto-backed up to `~/.ruoyi-backup/<timestamp>/` before modification
 - Tool output truncated to 3000 chars; Anthropic requires non-empty tool result strings
 - AI config stored in `configs/app_config.json` under `"ai"` key, not a separate file
 - System prompt adapts by build profile (Hub/Spoke/default): probes deployment mode before assuming blue-green proxy; injects `spoke_profile.json` or registered Spoke list from `hub_spokes.json`
 - `get_status` uses adaptive health checks (script status → project-type HTTP/TCP → Java actuator only when applicable)
 - Spoke `/self-check` (`RunSpokeChecks`): base env + Hub connectivity; :8000 proxy is optional (skipped if not listening)
+- Remote jobs support structured actions, idempotency keys, claim leases, append-only lifecycle events, and multi-Spoke batches; raw Shell remains compatible
+- Spoke profile schema v3 reports Agent/control versions, capabilities, resources, and service health; Hub governance stores alias/tags/group/environment/owner/maintenance/capability allowlist separately
 
 ## CLI Architecture
 
@@ -128,16 +129,17 @@ configs/sync_config.json     # File sync settings
 ## Hub AI Gateway (多服务器)
 
 - Hub 模式：`configs/app_config.json` 中 `"hub": {"enabled": true}` 启用
-- Hub 在代理端口暴露 `/__hub__/v1/register` 和 `/__hub__/v1/chat`；管理端口暴露 `/hub/token`、`/hub/status`、`/hub/revoke`
+- Hub 在代理端口暴露 `/__hub__/v1/token`、`register`、`profile`、`chat` 和远程控制轮询端点；管理端口仅监听 `127.0.0.1`
+- `/__hub__/v1/token` 匿名签发 15 分钟一次性 Token 是刻意的快速接入设计；安全前提是 Hub 域名不公开且 `/__hub__/` 只对受信网络或受控来源开放
 - Spoke 在 `/agent-config` 选择 `hub` 提供商，用 Hub 上 `/hub-token` 生成的一次性 Token 注册，之后 AI 调用经 Hub 转发（本地仍执行工具）
 - Spoke 注册表持久化在 `configs/hub_spokes.json`（gitignored 运行时文件）
-- v1 转发为非流式（整段返回）；Hub 进程重启会清空未使用的一次性注册 Token
+- v1 转发为非流式（整段返回）；未使用的一次性注册 Token 持久化到 `hub_pending_token.json`，消费或 15 分钟到期后失效
 
 ## Important Notes
 
 1. `make build` includes sync — no separate `make sync` needed before building
 2. Scripts/configs changes require recompile (embedded at build time)
-3. No test files exist; add `*_test.go` alongside source files
-4. `internal/handler/` and `internal/sync/` are empty and should stay that way until explicitly developed
+3. Add or update `*_test.go` alongside changed code; protocol changes must retain Hub v1 compatibility tests
+4. File synchronization is not a supported feature; do not reintroduce sync configuration or commands without an explicit product decision
 5. Platform: Windows (dev), Linux (deployment); `build.bat` defaults to Linux cross-compile
 6. Config output goes to `bin/ruoyi-proxy` (current platform) or `bin/ruoyi-proxy-linux` (Linux)

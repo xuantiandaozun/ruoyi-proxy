@@ -16,18 +16,28 @@ import (
 var hubMgmtBaseURL = localHubMgmtBaseURL()
 var hubMgmtHTTPClient = &http.Client{Timeout: 8 * time.Second}
 
+type hubRemoteAction struct {
+	Type   string            `json:"type"`
+	Params map[string]string `json:"params,omitempty"`
+}
+
 type hubRemoteJob struct {
-	ID          string    `json:"id"`
-	SpokeID     string    `json:"spoke_id"`
-	Command     string    `json:"command"`
-	WorkDir     string    `json:"workdir,omitempty"`
-	TimeoutSecs int       `json:"timeout_seconds"`
-	Status      string    `json:"status"`
-	Output      string    `json:"output,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	FinishedAt  time.Time `json:"finished_at,omitempty"`
+	ID           string           `json:"id"`
+	BatchID      string           `json:"batch_id,omitempty"`
+	SpokeID      string           `json:"spoke_id"`
+	Command      string           `json:"command"`
+	Action       *hubRemoteAction `json:"action,omitempty"`
+	WorkDir      string           `json:"workdir,omitempty"`
+	TimeoutSecs  int              `json:"timeout_seconds"`
+	Status       string           `json:"status"`
+	Output       string           `json:"output,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	Attempt      int              `json:"attempt,omitempty"`
+	MaxAttempts  int              `json:"max_attempts,omitempty"`
+	CreatedAt    time.Time        `json:"created_at"`
+	ClaimedUntil time.Time        `json:"claimed_until,omitempty"`
+	StartedAt    time.Time        `json:"started_at,omitempty"`
+	FinishedAt   time.Time        `json:"finished_at,omitempty"`
 }
 
 func init() {
@@ -113,6 +123,8 @@ func (e *ToolExecutor) hubRemoteCommand(spokeID, command, workDir string, timeou
 	payload, err := json.Marshal(map[string]interface{}{
 		"spoke_id": spokeID, "command": command,
 		"workdir": strings.TrimSpace(workDir), "timeout_seconds": timeoutSecs,
+		"actor": "local-user", "source": "agent",
+		"confirmed_by": "local-user", "confirmed_at": time.Now(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("编码远程任务失败: %v", err)
@@ -234,8 +246,19 @@ func formatHubRemoteJob(job hubRemoteJob) string {
 		fmt.Sprintf("任务: %s", job.ID),
 		fmt.Sprintf("Spoke: %s", job.SpokeID),
 		fmt.Sprintf("状态: %s", job.Status),
-		fmt.Sprintf("命令: %s", job.Command),
 	)
+	if job.BatchID != "" {
+		lines = append(lines, "批次: "+job.BatchID)
+	}
+	if job.Action != nil {
+		actionJSON, _ := json.Marshal(job.Action)
+		lines = append(lines, "动作: "+string(actionJSON))
+	} else {
+		lines = append(lines, fmt.Sprintf("命令: %s", job.Command))
+	}
+	if job.MaxAttempts > 0 {
+		lines = append(lines, fmt.Sprintf("尝试: %d/%d", job.Attempt, job.MaxAttempts))
+	}
 	if strings.TrimSpace(job.Output) != "" {
 		lines = append(lines, "输出:\n"+strings.TrimSpace(job.Output))
 	}
@@ -246,7 +269,7 @@ func formatHubRemoteJob(job hubRemoteJob) string {
 }
 
 func isHubRemoteJobFinished(status string) bool {
-	return status == "succeeded" || status == "failed" || status == "timed_out"
+	return status == "succeeded" || status == "failed" || status == "timed_out" || status == "canceled"
 }
 
 func localHubMgmtBaseURL() string {

@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"ruoyi-proxy/internal/agent"
+	"ruoyi-proxy/internal/bootstrap"
 	"ruoyi-proxy/internal/hub"
+	"ruoyi-proxy/internal/nodeinfo"
 )
 
 const defaultPollInterval = 3 * time.Second
@@ -32,6 +34,7 @@ type Worker struct {
 	config       agent.AIConfig
 	client       *http.Client
 	pollInterval time.Duration
+	profileSync  func() error
 	logf         func(format string, args ...interface{})
 }
 
@@ -51,6 +54,7 @@ func NewFromLocalConfig(logf func(format string, args ...interface{})) (*Worker,
 		config:       cfg,
 		client:       &http.Client{Timeout: 15 * time.Second},
 		pollInterval: defaultPollInterval,
+		profileSync:  bootstrap.RefreshAndSyncSpokeProfile,
 		logf:         logf,
 	}, nil
 }
@@ -63,11 +67,25 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.logf("Spoke 远程控制执行器已启动")
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
+	nextProfileSync := time.Time{}
 	for {
+		if w.profileSync != nil && !time.Now().Before(nextProfileSync) {
+			nextProfileSync = time.Now().Add(time.Minute)
+			if err := w.profileSync(); err != nil && ctx.Err() == nil {
+				w.logf("刷新 Spoke 能力与健康档案失败: %v", err)
+			}
+		}
 		job, err := w.poll(ctx)
 		if err != nil && ctx.Err() == nil {
 			w.logf("领取 Hub 任务失败: %v", err)
 		} else if job != nil {
+			running := Result{JobID: job.ID, Status: hub.ControlJobRunning}
+			if err := w.postResultWithRetry(ctx, running); err != nil {
+				if ctx.Err() == nil {
+					w.logf("确认任务[%s]开始失败，本次不执行: %v", job.ID, err)
+				}
+				continue
+			}
 			result := executeJob(ctx, *job)
 			if err := w.postResultWithRetry(ctx, result); err != nil && ctx.Err() == nil {
 				w.logf("回传任务[%s]结果失败: %v", job.ID, err)
@@ -89,6 +107,8 @@ func (w *Worker) poll(ctx context.Context) (*hub.ControlJob, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+w.config.APIKey)
+	req.Header.Set("X-Ruoyi-Control-Version", fmt.Sprintf("%d", nodeinfo.ControlProtocolVersion))
+	req.Header.Set("X-Ruoyi-Capabilities", strings.Join(nodeinfo.Capabilities(), ","))
 	resp, err := w.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -115,6 +135,10 @@ func executeJob(parent context.Context, job hub.ControlJob) Result {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+
+	if job.Action != nil && job.Action.Type != hub.ControlActionShell {
+		return executeStructuredAction(ctx, job)
+	}
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -168,6 +192,8 @@ func (w *Worker) postResult(ctx context.Context, result Result) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+w.config.APIKey)
+	req.Header.Set("X-Ruoyi-Control-Version", fmt.Sprintf("%d", nodeinfo.ControlProtocolVersion))
+	req.Header.Set("X-Ruoyi-Capabilities", strings.Join(nodeinfo.Capabilities(), ","))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := w.client.Do(req)
 	if err != nil {

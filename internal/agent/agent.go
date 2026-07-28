@@ -1122,63 +1122,84 @@ func isReadOnlyShellCmd(argsJSON string) bool {
 	if cmd == "" {
 		return false
 	}
+	lowerCmd := strings.ToLower(cmd)
 
-	// 包含这些特征 → 明确是写操作，不跳过确认
+	// 复合 Shell 语法可能在只读命令后追加写操作。这里采用保守策略：
+	// 只要包含控制符、重定向或命令替换，就必须进入确认流程。
+	if strings.ContainsAny(cmd, ";&|><\r\n`") || strings.Contains(cmd, "$(") {
+		return false
+	}
+
+	// 包含这些特征 → 明确是写操作，不跳过确认。
 	writeSignals := []string{
-		">", ">>", // 重定向写入
 		"rm ", "rmdir ", // 删除
 		"mv ", "cp ", // 移动/复制（可能覆盖）
 		"chmod ", "chown ", // 权限修改
-		"dd ", "mkfs", "fdisk", // 磁盘操作
-		"systemctl ", "service ", // 服务控制（由 manage_systemd 负责）
-		"apt", "yum", "dnf", "pacman", "apk", "pip", "npm install", // 安装
-		"curl -o", "wget -O", "wget -P", // 下载写入
+		"dd ", "mkfs", // 磁盘操作
+		"service ",                               // 服务控制（由 manage_systemd 负责）
+		"pacman ", "apk ", "pip ", "npm install", // 安装
+		"wget ",                     // 下载写入
 		"tar -x", "unzip", "gunzip", // 解压
 		"kill ", "pkill ", "killall ", // 进程终止
 		"passwd ", "useradd ", "userdel", // 用户管理
 		"crontab ",          // 定时任务修改
 		"iptables ", "ufw ", // 防火墙修改
 		"mount ", "umount ", // 挂载
-		"sed -i", "awk '", // 原地修改
+		"reboot", "shutdown", "poweroff", "halt", // 主机电源
 	}
 	for _, sig := range writeSignals {
-		if strings.Contains(cmd, sig) {
+		if strings.Contains(lowerCmd, sig) {
 			return false
 		}
 	}
 
-	// 这些命令（精确匹配或前缀匹配）→ 明确是只读
+	if hasUnsafeReadOnlyArguments(lowerCmd) {
+		return false
+	}
+
+	// 这些命令只允许精确匹配，避免参数把查询命令变成执行器或写操作。
+	exactReadOnly := []string{
+		"pwd", "ll", "env", "set", "hostname", "date", "uptime", "whoami",
+		"w", "who", "last", "lastlog",
+	}
+	for _, exact := range exactReadOnly {
+		if lowerCmd == exact {
+			return true
+		}
+	}
+
+	// 这些命令（精确匹配或前缀匹配）→ 明确是只读。
 	readOnlyPrefixes := []string{
 		// nginx 检测
 		"nginx -t", "nginx -T",
 		// 目录/文件列表
-		"ls", "ll", "dir", "pwd", "realpath",
+		"ls", "dir", "realpath",
 		// 文件查看
 		"cat", "less", "more", "head", "tail", "strings",
 		// 文本处理（非原地修改）
-		"grep", "awk", "sed -n", "sort", "uniq", "wc", "cut", "tr", "diff", "comm",
+		"grep", "sort", "uniq", "wc", "cut", "tr", "diff", "comm",
 		// 文件查找
 		"find", "locate", "which", "type", "whereis",
 		// 磁盘信息
 		"df", "du", "lsblk", "blkid", "fdisk -l",
 		// 进程/负载
-		"ps", "top", "htop", "uptime", "pstree", "pgrep",
+		"ps", "top", "htop", "pstree", "pgrep",
 		// 内存/IO
 		"free", "vmstat", "iostat", "sar", "mpstat",
 		// 网络信息（只查看）
-		"netstat", "ss", "lsof", "ifconfig", "ip addr", "ip route", "ip link",
+		"netstat", "ss", "lsof", "ifconfig",
 		// 网络测试（不修改状态）
 		"ping", "traceroute", "tracepath", "nslookup", "dig", "host",
-		"curl -s", "curl -I", "curl --silent", "curl --head", "curl --head",
+		"curl -s", "curl -I", "curl --silent", "curl --head",
 		// 系统信息
-		"uname", "hostname", "date", "timedatectl status",
+		"uname", "date", "timedatectl status",
 		"lscpu", "lshw", "dmidecode", "inxi",
 		// 用户信息
-		"whoami", "id", "groups", "w", "who", "last", "lastlog",
+		"id", "groups",
 		// 文件信息
 		"stat", "file", "md5sum", "sha256sum", "sha1sum", "xxd",
 		// 环境/变量查看
-		"env", "printenv", "set",
+		"printenv",
 		// 版本信息
 		"java -version", "java --version",
 		"python --version", "python3 --version",
@@ -1196,17 +1217,75 @@ func isReadOnlyShellCmd(argsJSON string) bool {
 		"apt list", "apt show", "yum list", "yum info",
 		"dnf list", "dnf info",
 	}
-	lowerCmd := strings.ToLower(cmd)
 	for _, prefix := range readOnlyPrefixes {
 		p := strings.ToLower(prefix)
 		if lowerCmd == p {
-			return true // 精确匹配（如 pwd、ls、date）
+			return true
 		}
 		if strings.HasPrefix(lowerCmd, p+" ") || strings.HasPrefix(lowerCmd, p+"\t") {
-			return true // 前缀匹配（如 ls -la、cat /etc/nginx.conf）
+			return true
 		}
 	}
 
+	return false
+}
+
+// hasUnsafeReadOnlyArguments 拦截可把查询命令转换为写操作的参数。
+func hasUnsafeReadOnlyArguments(lowerCmd string) bool {
+	fields := strings.Fields(lowerCmd)
+	if len(fields) == 0 {
+		return true
+	}
+
+	switch fields[0] {
+	case "find":
+		for _, field := range fields[1:] {
+			switch field {
+			case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf":
+				return true
+			}
+		}
+	case "curl":
+		for _, field := range fields[1:] {
+			if field == "-d" || strings.HasPrefix(field, "-d") ||
+				field == "-f" || strings.HasPrefix(field, "--data") ||
+				strings.HasPrefix(field, "--form") || strings.HasPrefix(field, "-f") ||
+				strings.HasPrefix(field, "-x") ||
+				strings.HasPrefix(field, "--request") || strings.HasPrefix(field, "-t") ||
+				strings.HasPrefix(field, "--upload-file") || strings.HasPrefix(field, "-o") ||
+				strings.HasPrefix(field, "--output") || strings.HasPrefix(field, "-k") ||
+				strings.HasPrefix(field, "--config") ||
+				strings.HasPrefix(field, "--remote-name") {
+				return true
+			}
+		}
+	case "date":
+		for _, field := range fields[1:] {
+			if field == "-s" || strings.HasPrefix(field, "--set") {
+				return true
+			}
+		}
+	case "journalctl":
+		for _, field := range fields[1:] {
+			if strings.HasPrefix(field, "--vacuum") || field == "--rotate" ||
+				field == "--flush" || field == "--sync" ||
+				strings.Contains(field, "relinquish-var") {
+				return true
+			}
+		}
+	case "dmesg":
+		for _, field := range fields[1:] {
+			if field == "-c" || field == "--clear" || field == "--read-clear" {
+				return true
+			}
+		}
+	case "nginx":
+		for _, field := range fields[1:] {
+			if field == "-s" {
+				return true
+			}
+		}
+	}
 	return false
 }
 

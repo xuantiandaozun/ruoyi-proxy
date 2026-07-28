@@ -25,6 +25,23 @@ type Config struct {
 	Services map[string]*ServiceConfig `json:"services"` // 服务配置，key为服务ID
 }
 
+// Clone 返回配置的深拷贝，避免调用方在锁外修改共享状态。
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	cloned := &Config{Services: make(map[string]*ServiceConfig, len(c.Services))}
+	for id, service := range c.Services {
+		if service == nil {
+			cloned.Services[id] = nil
+			continue
+		}
+		serviceCopy := *service
+		cloned.Services[id] = &serviceCopy
+	}
+	return cloned
+}
+
 // 常量配置
 const (
 	ConfigFile = "configs/proxy_config.json"

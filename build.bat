@@ -5,8 +5,9 @@ echo 同步最新脚本...
 xcopy /E /I /Y scripts cmd\proxy\scripts >nul
 xcopy /E /I /Y configs cmd\proxy\configs >nul
 
-set LDFLAGS=-s -w
 set BUILD_PKG=ruoyi-proxy/internal/buildinfo
+if not defined BUILD_VERSION set BUILD_VERSION=dev
+set LDFLAGS=-s -w -X %BUILD_PKG%.Version=%BUILD_VERSION%
 
 if /i "%1"=="linux-hub" (
     echo 准备 Hub 嵌入配置...

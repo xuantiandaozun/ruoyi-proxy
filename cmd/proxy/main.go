@@ -4,10 +4,13 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,7 +44,9 @@ func main() {
 		runCLI()
 		return
 	}
-	runProxy()
+	if err := runProxy(); err != nil {
+		log.Fatalf("代理服务异常退出: %v", err)
+	}
 }
 
 func runSpokeAgent() {
@@ -61,48 +66,87 @@ func runCLI() {
 	c.Start()
 }
 
-func runProxy() {
+func runProxy() error {
 	log.Println("蓝绿代理程序启动中...")
-	go func() {
-		if err := taskruntime.Run(context.Background(), log.Printf); err != nil {
-			log.Printf("AI 定时任务调度器退出: %v", err)
-		}
-	}()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	hubSettings, _ := hub.LoadHubSettings()
 	hubActive := hubSettings.Enabled || buildinfo.IsHub()
 	if hubActive {
 		if err := hub.LoadSpokes(); err != nil {
 			log.Printf("加载 Hub spoke 注册表失败: %v", err)
-		} else if hubSettings.Enabled || buildinfo.IsHub() {
+		} else {
 			log.Println("Hub AI 网关已启用")
 		}
 	}
 
-	// 初始化代理
 	p, err := proxy.New()
 	if err != nil {
-		log.Fatalf("代理初始化失败: %v", err)
+		return fmt.Errorf("代理初始化失败: %v", err)
 	}
+
+	var background sync.WaitGroup
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		if runErr := taskruntime.Run(ctx, log.Printf); runErr != nil && ctx.Err() == nil {
+			log.Printf("AI 定时任务调度器退出: %v", runErr)
+		}
+	}()
 
 	// 已运行代理的 Spoke 直接由代理进程领取 Hub 任务，无需额外常驻服务。
 	if buildinfo.IsSpoke() {
+		background.Add(1)
 		go func() {
-			if runErr := spokecontrol.RunProxyOwned(context.Background(), log.Printf); runErr != nil {
+			defer background.Done()
+			if runErr := spokecontrol.RunProxyOwned(ctx, log.Printf); runErr != nil && ctx.Err() == nil {
 				log.Printf("代理内置 Spoke 远程控制退出: %v", runErr)
 			}
 		}()
 	}
 
-	// 启动管理服务器（在后台goroutine中）
-	go startMgmtServer(p, hubActive)
+	proxyServer := newProxyServer(p, hubActive)
+	mgmtServer := newMgmtServer(p, hubActive)
+	serverErrors := make(chan error, 2)
+	go serveHTTPServer(proxyServer, "代理服务器", serverErrors)
+	go serveHTTPServer(mgmtServer, "管理服务器", serverErrors)
 
-	// 启动代理服务器
-	startProxyServer(p, hubActive)
+	log.Printf("代理服务器启动在端口 %s", config.ProxyPort)
+	log.Printf("nginx upstream配置: server 127.0.0.1%s;", config.ProxyPort)
+	log.Printf("管理服务器启动在端口 %s", config.MgmtPort)
+
+	var exitErr error
+	select {
+	case serverErr := <-serverErrors:
+		log.Printf("服务异常退出: %v", serverErr)
+		exitErr = serverErr
+		stop()
+	case <-ctx.Done():
+		stop()
+		log.Println("收到退出信号，正在停止代理服务...")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	shutdownServers(shutdownCtx, proxyServer, mgmtServer)
+
+	backgroundDone := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(backgroundDone)
+	}()
+	select {
+	case <-backgroundDone:
+		log.Println("代理服务已安全停止")
+	case <-shutdownCtx.Done():
+		log.Printf("等待后台任务退出超时: %v", shutdownCtx.Err())
+	}
+	return exitErr
 }
 
-// startProxyServer 启动代理服务器
-func startProxyServer(p *proxy.Proxy, hubEnabled bool) {
+// newProxyServer 创建公开代理服务器。
+func newProxyServer(p *proxy.Proxy, hubEnabled bool) *http.Server {
 	proxyMux := http.NewServeMux()
 	proxyMux.HandleFunc("/", p.HandleProxy)
 	if hubEnabled {
@@ -114,26 +158,19 @@ func startProxyServer(p *proxy.Proxy, hubEnabled bool) {
 		proxyMux.HandleFunc("/__hub__/v1/control/result", hub.ControlResultHandler)
 	}
 
-	proxyServer := &http.Server{
+	return &http.Server{
 		Addr:    config.ProxyPort,
 		Handler: proxyMux,
-		// 超时设置：支持长时间请求与SSE，避免被代理提前断开
-		ReadTimeout:       900 * time.Second, // 读取请求体超时
-		WriteTimeout:      900 * time.Second, // 写入响应超时（流式或长响应建议较大或0）
-		IdleTimeout:       120 * time.Second, // 空闲连接超时
-		ReadHeaderTimeout: 30 * time.Second,  // 读取请求头超时
-	}
-
-	log.Printf("代理服务器启动在端口 %s", config.ProxyPort)
-	log.Printf("nginx upstream配置: server 127.0.0.1%s;", config.ProxyPort)
-
-	if err := proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("代理服务器启动失败: %v", err)
+		// 超时设置：支持长时间请求与SSE，避免被代理提前断开。
+		ReadTimeout:       900 * time.Second,
+		WriteTimeout:      900 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 }
 
-// startMgmtServer 启动管理服务器
-func startMgmtServer(p *proxy.Proxy, hubEnabled bool) {
+// newMgmtServer 创建仅监听回环地址的管理服务器。
+func newMgmtServer(p *proxy.Proxy, hubEnabled bool) *http.Server {
 	mgmtMux := http.NewServeMux()
 	mgmtMux.HandleFunc("/switch", func(w http.ResponseWriter, r *http.Request) {
 		handleSwitch(p, w, r)
@@ -145,21 +182,40 @@ func startMgmtServer(p *proxy.Proxy, hubEnabled bool) {
 		mgmtMux.HandleFunc("/hub/token", hub.TokenAdminHandler)
 		mgmtMux.HandleFunc("/hub/status", hub.StatusAdminHandler)
 		mgmtMux.HandleFunc("/hub/spoke", hub.SpokeAdminHandler)
+		mgmtMux.HandleFunc("/hub/spoke/governance", hub.SpokeGovernanceAdminHandler)
 		mgmtMux.HandleFunc("/hub/revoke", hub.RevokeAdminHandler)
 		mgmtMux.HandleFunc("/hub/control", hub.ControlEnqueueAdminHandler)
+		mgmtMux.HandleFunc("/hub/control/cancel", hub.ControlCancelAdminHandler)
+		mgmtMux.HandleFunc("/hub/control/retry", hub.ControlRetryAdminHandler)
 		mgmtMux.HandleFunc("/hub/jobs", hub.ControlJobsAdminHandler)
 	}
+	return &http.Server{Addr: "127.0.0.1" + config.MgmtPort, Handler: mgmtMux}
+}
 
-	mgmtServer := &http.Server{
-		Addr:    "127.0.0.1" + config.MgmtPort,
-		Handler: mgmtMux,
+func serveHTTPServer(server *http.Server, name string, errorCh chan<- error) {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errorCh <- fmt.Errorf("%s启动失败: %v", name, err)
 	}
+}
 
-	log.Printf("管理服务器启动在端口 %s", config.MgmtPort)
-
-	if err := mgmtServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("管理服务器启动失败: %v", err)
+func shutdownServers(ctx context.Context, servers ...*http.Server) {
+	var shutdown sync.WaitGroup
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
+		shutdown.Add(1)
+		go func(current *http.Server) {
+			defer shutdown.Done()
+			if err := current.Shutdown(ctx); err != nil {
+				log.Printf("停止 HTTP 服务失败，将强制关闭: %v", err)
+				if closeErr := current.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					log.Printf("强制关闭 HTTP 服务失败: %v", closeErr)
+				}
+			}
+		}(server)
 	}
+	shutdown.Wait()
 }
 
 // handleSwitch 处理切换环境请求

@@ -32,8 +32,11 @@ func TestControlJobLifecycle(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("领取任务失败: job=%v err=%v", claimed, err)
 	}
-	if claimed.Status != "running" {
+	if claimed.Status != ControlJobClaimed {
 		t.Fatalf("领取后状态 = %s", claimed.Status)
+	}
+	if err := StartControlJob("spoke-test", claimed.ID); err != nil {
+		t.Fatal(err)
 	}
 	if err := CompleteControlJob("spoke-test", claimed.ID, "succeeded", "ok", ""); err != nil {
 		t.Fatal(err)

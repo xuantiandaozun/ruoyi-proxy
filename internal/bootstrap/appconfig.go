@@ -10,9 +10,9 @@ const spokeProfileFile = "configs/spoke_profile.json"
 
 // AppPaths 从 app_config.json 读取的路径信息
 type AppPaths struct {
-	Domain     string
-	NginxConf  string
-	HTMLPath   string
+	Domain      string
+	NginxConf   string
+	HTMLPath    string
 	EnableHTTPS bool
 }
 

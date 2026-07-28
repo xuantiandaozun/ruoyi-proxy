@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,9 +18,10 @@ import (
 	"ruoyi-proxy/internal/buildinfo"
 	"ruoyi-proxy/internal/config"
 	"ruoyi-proxy/internal/hub"
+	"ruoyi-proxy/internal/nodeinfo"
 )
 
-const currentSpokeProfileVersion = 2
+const currentSpokeProfileVersion = 3
 
 var publicIPDetector = detectPublicIP
 
@@ -153,7 +155,7 @@ func runSpokeOnboarding(io *CLIO) error {
 		AppHome:       appHome,
 		UpdatedAt:     time.Now(),
 	}
-	profile.Services = collectServiceRefs()
+	refreshRuntimeProfile(&profile)
 
 	if err := applyProfileLocally(&profile); err != nil {
 		return fmt.Errorf("写入本地配置: %w", err)
@@ -203,8 +205,7 @@ func migrateSpokeProfile(io *CLIO, profile *hub.SpokeProfile) error {
 	profile.OS = runtime.GOOS
 	profile.Arch = runtime.GOARCH
 	profile.PrivateIPs = localIPAddresses()
-	profile.Services = collectServiceRefs()
-	profile.UpdatedAt = time.Now()
+	refreshRuntimeProfile(profile)
 	if wd, err := os.Getwd(); err == nil {
 		profile.AppHome = filepath.Clean(wd)
 	}
@@ -246,7 +247,7 @@ func migrateSpokeProfile(io *CLIO, profile *hub.SpokeProfile) error {
 		profile.PublicIP = publicIPDetector()
 		if profile.PublicIP != "" {
 			io.Print(fmt.Sprintf("\033[1;36m检测到公网 IP: %s\033[0m", profile.PublicIP))
-		} else if originalVersion < currentSpokeProfileVersion {
+		} else if originalVersion < 2 {
 			value, err := io.Ask("\033[1;33m公网 IP\033[0m (自动检测失败，请输入；不确定可留空由 Hub 兜底): ")
 			if err != nil {
 				return err
@@ -257,7 +258,7 @@ func migrateSpokeProfile(io *CLIO, profile *hub.SpokeProfile) error {
 			}
 		}
 	}
-	if originalVersion < currentSpokeProfileVersion && strings.TrimSpace(profile.Description) == "" {
+	if originalVersion < 2 && strings.TrimSpace(profile.Description) == "" {
 		value, err := io.Ask("\033[1;33m服务器备注\033[0m (负责人、用途或注意事项，可选): ")
 		if err != nil {
 			return err
@@ -360,6 +361,27 @@ func mapProjectType(choice, fallback string) string {
 	}
 }
 
+func refreshRuntimeProfile(profile *hub.SpokeProfile) {
+	if profile == nil {
+		return
+	}
+	version, protocol, capabilities, resources := nodeinfo.Snapshot()
+	profile.AgentVersion = version
+	profile.ControlProtocol = protocol
+	profile.Capabilities = capabilities
+	profile.Resources = hub.SpokeResourceSnapshot{
+		CPUCount:             resources.CPUCount,
+		MemoryTotalBytes:     resources.MemoryTotalBytes,
+		MemoryAvailableBytes: resources.MemoryAvailableBytes,
+		DiskTotalBytes:       resources.DiskTotalBytes,
+		DiskFreeBytes:        resources.DiskFreeBytes,
+		CollectedAt:          resources.CollectedAt,
+	}
+	profile.Services = collectServiceRefs()
+	profile.Health = summarizeSpokeHealth(profile.Services)
+	profile.UpdatedAt = time.Now()
+}
+
 func collectServiceRefs() []hub.SpokeServiceRef {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -370,14 +392,68 @@ func collectServiceRefs() []hub.SpokeServiceRef {
 		if svc == nil {
 			continue
 		}
+		endpoint := svc.BlueTarget
+		if svc.ActiveEnv == "green" {
+			endpoint = svc.GreenTarget
+		}
 		refs = append(refs, hub.SpokeServiceRef{
 			ID:          id,
 			Name:        svc.Name,
 			ProjectType: svc.ProjectType,
 			ActiveEnv:   svc.ActiveEnv,
+			Endpoint:    endpoint,
+			Health:      probeServiceEndpoint(endpoint),
 		})
 	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })
 	return refs
+}
+
+func probeServiceEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "unknown"
+	}
+	address := endpoint
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+		address = parsed.Host
+	}
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		return "unknown"
+	}
+	connection, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
+	if err != nil {
+		return "unreachable"
+	}
+	connection.Close()
+	return "healthy"
+}
+
+func summarizeSpokeHealth(services []hub.SpokeServiceRef) hub.SpokeHealthSummary {
+	summary := hub.SpokeHealthSummary{Status: "unknown", Summary: "未配置可探测服务", CheckedAt: time.Now()}
+	if len(services) == 0 {
+		return summary
+	}
+	healthy := 0
+	unknown := 0
+	for _, service := range services {
+		switch service.Health {
+		case "healthy":
+			healthy++
+		case "unknown":
+			unknown++
+		}
+	}
+	summary.Summary = fmt.Sprintf("%d/%d 个服务端点可连接", healthy, len(services))
+	switch {
+	case healthy == len(services):
+		summary.Status = "healthy"
+	case healthy > 0 || unknown > 0:
+		summary.Status = "degraded"
+	default:
+		summary.Status = "unhealthy"
+	}
+	return summary
 }
 
 func applyProfileLocally(profile *hub.SpokeProfile) error {
@@ -436,8 +512,7 @@ func loadLocalSpokeProfile() (hub.SpokeProfile, error) {
 		return profile, err
 	}
 	profile.Hostname = Hostname()
-	profile.UpdatedAt = time.Now()
-	profile.Services = collectServiceRefs()
+	refreshRuntimeProfile(&profile)
 	// 刷新 app_home
 	if wd, err := os.Getwd(); err == nil {
 		profile.AppHome = wd

@@ -6,9 +6,9 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey)](https://github.com)
 
-A full-featured blue-green deployment proxy server with zero-downtime deployments, automatic HTTPS, multi-service management, file synchronization, and AI-powered operations.
+A multi-server operations proxy with blue-green deployment, zero-downtime switching, automatic HTTPS, multi-service management, and AI-powered operations.
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Usage Guide](#-usage-guide) • [AI Agent Mode](#-ai-agent-mode) • [Hub AI Gateway](#-hub-ai-gateway) • [Architecture](#-architecture) • [Contributing](#-contributing)
+[Features](#-features) • [Quick Start](#-quick-start) • [Usage Guide](#-usage-guide) • [AI Agent Mode](#-ai-agent-mode) • [Hub AI Gateway](#-hub-ai-gateway) • [Development Roadmap](docs/FEATURE_ROADMAP.md) • [Contributing](#-contributing)
 
 **[🇨🇳 中文文档](README_CN.md)**
 
@@ -132,7 +132,6 @@ The init wizard will guide you through:
 - ☕ Installing Java 17 (optional)
 - ⚙️ Configuring the proxy (ports, target addresses)
 - 🌐 Setting up domain and HTTPS
-- 🔄 Configuring file sync (optional)
 
 ### Option 2: Local Development
 
@@ -187,8 +186,6 @@ curl http://localhost:8001/status
 # Switch to green environment
 curl -X POST "http://localhost:8001/switch?env=green"
 
-# Health check
-curl http://localhost:8001/health
 ```
 
 ---
@@ -203,11 +200,15 @@ ruoyi-proxy/
 ├── internal/
 │   ├── agent/          # AI Agent module (ReAct engine, tools, LLM adapters)
 │   ├── cli/            # Interactive CLI (Agent-first entry)
-│   ├── config/         # Configuration management
-│   ├── hub/            # Hub AI gateway (registration, forwarding, Spoke mgmt)
-│   ├── proxy/          # Reverse proxy core
-│   ├── handler/        # (planned, not yet implemented)
-│   └── sync/           # (planned, not yet implemented)
+│   ├── bootstrap/      # Initialization, self-check, and Hub/Spoke setup
+│   ├── commandcatalog/ # Shared CLI and AI command catalog
+│   ├── config/         # Proxy configuration
+│   ├── database/       # MySQL profiles and controlled queries
+│   ├── hub/            # Hub registration, AI relay, and remote jobs
+│   ├── proxy/          # Blue-green reverse proxy core
+│   ├── scheduler/      # SQLite schedules and run audit
+│   ├── spokecontrol/   # Outbound Spoke worker
+│   └── taskruntime/    # Background AI task runtime
 ├── configs/            # Config templates and examples
 │   ├── app_config.example.json   # App config example (ai, hub, jvm)
 │   ├── nginx.conf.template       # Nginx HTTP template
@@ -216,7 +217,7 @@ ruoyi-proxy/
 │   ├── init.sh         # Initialization script
 │   ├── service.sh      # Service management (includes deploy-lowmem)
 │   ├── https.sh        # HTTPS management
-│   └── deploy.sh       # Deployment script
+│   └── configure-nginx.sh # Generate Nginx configuration
 ├── bin/                # Build output directory
 ├── Makefile            # Make build script
 ├── build.bat           # Windows build script
@@ -346,12 +347,17 @@ make clean              # Clean build artifacts
 # AI & Hub
 /agent-config      # Configure AI provider / Spoke registration
 /hub-token         # (Hub) Generate Spoke registration token
-/hub-status        # (Hub) List Spokes
+/hub-status        # (Hub) List Spoke capabilities, resources, and health
+/hub-select [id|clear] # Select the default remote node
+/hub-node-set <id> <key=value...> # Set group, tags, maintenance, and capability allowlist
 /hub-spoke <id>    # (Hub) View a Spoke
 /hub-enable        # Enable Hub gateway (requires proxy restart)
 /hub-disable       # Disable Hub gateway
 /hub-revoke <id>   # (Hub) Revoke a Spoke
 /hub-exec <id> <command> # (Hub) Dispatch a remote command to a Spoke
+/hub-action <id[,id]|@group> <action> [args] # Dispatch to nodes or a group
+/hub-cancel <job-id> # Cancel a pending job
+/hub-retry <job-id>  # Retry an abnormal job
 /hub-jobs [id]     # (Hub) View remote jobs and results
 /spoke-agent-install # Install the daemon on a Spoke without proxy mode
 /spoke-agent-status  # Show remote-control ownership or daemon status
@@ -683,13 +689,21 @@ Spoke server C ──┘         ▲
                     Tools still run on each Spoke
 ```
 
-Hub remote control does not require an inbound port on the Spoke. Hub stores commands in a job queue; each Spoke polls outbound over HTTP every three seconds and posts the result:
+Hub remote control does not require an inbound port on the Spoke. Hub stores jobs in a queue; each Spoke polls outbound over HTTP every three seconds and posts the result:
 
 ```text
-Hub CLI / AI → Hub job queue ← outbound Spoke polling → local Shell
+Hub CLI / AI → Hub job queue ← outbound Spoke polling → structured executor / controlled Shell
 ```
 
 Remote commands always require Hub-side user confirmation. The Hub management API listens only on `127.0.0.1:8001`; Spokes use their registered long-lived credential for public `/__hub__/v1/control/*` endpoints.
+
+Jobs support idempotency keys, claim leases, cancellation, retry, and append-only lifecycle events. `/hub-action` supports service status, logs, restart, deployment, and read-only database queries across comma-separated Spoke targets, with an independent job and result per target. Legacy workers do not claim structured actions.
+
+After `/hub-select spoke-xxx`, `/hub-exec`, `/hub-action`, `/hub-jobs`, and `/hub-spoke` can omit the node ID; the prompt shows the effective selected node.
+
+Spoke profile v3 refreshes Agent/control versions, capabilities, CPU, memory, disk, and service endpoint health every minute. Hub-managed aliases, tags, groups, environments, owners, maintenance state, and capability allowlists are stored separately from Spoke heartbeats. Maintenance nodes do not claim work, and structured actions require both a live reported capability and Hub allowlist approval. Use `@group` as a `/hub-action` target for group dispatch.
+
+> **Registration trust boundary**: `/__hub__/v1/token` intentionally allows a Spoke to obtain a 15-minute one-time token without prior authentication so trusted nodes can onboard quickly. This assumes the Hub domain is undisclosed and `/__hub__/` is reachable only from a trusted network or controlled sources. Before exposing the domain publicly, restrict this path with Nginx, a firewall, or a VPN. Long-lived credentials can still be revoked with `/hub-revoke`.
 
 ### Deployment Steps
 
@@ -755,9 +769,12 @@ An installed `spoke-agent` automatically idles while proxy mode is active and ta
 | `/__hub__/v1/control/poll` | 8000 (proxy) | Spoke claims a remote job |
 | `/__hub__/v1/control/result` | 8000 (proxy) | Spoke posts execution results |
 | `/hub/token` | 8001 (mgmt) | Admin token generation |
-| `/hub/status` | 8001 (mgmt) | Spoke list |
+| `/hub/status` | 8001 (mgmt) | Spoke list, optionally filtered by `group` |
+| `/hub/spoke/governance` | 8001 (mgmt) | Partially update Hub-managed node governance |
 | `/hub/revoke` | 8001 (mgmt) | Revoke Spoke |
-| `/hub/control` | 8001 (mgmt) | Create a remote job locally on Hub |
+| `/hub/control` | 8001 (mgmt) | Create single-target, batch, or structured remote jobs |
+| `/hub/control/cancel` | 8001 (mgmt) | Cancel a pending job |
+| `/hub/control/retry` | 8001 (mgmt) | Retry a failed, timed-out, or canceled job |
 | `/hub/jobs` | 8001 (mgmt) | Query jobs and results locally on Hub |
 
 > Hub requires Nginx `location ^~ /__hub__/` routing to the proxy port. Use `/self-check` or `/fix-nginx-hub` for diagnostics and AI-assisted fixes.
@@ -827,7 +844,7 @@ sudo systemctl status ruoyi-proxy
 
 ```bash
 # Periodic health check
-*/5 * * * * curl -sf http://localhost:8001/health || echo "Service down" | mail -s "Alert" admin@example.com
+*/5 * * * * curl -sf http://localhost:8001/status || echo "Proxy down" | mail -s "Alert" admin@example.com
 
 # Log monitoring
 tail -f /var/log/ruoyi-proxy.log
@@ -954,7 +971,7 @@ Admin → CLI/API(:8001) → Validate env → Update config → Save file → Re
 1. **Single responsibility** - Each package has one clearly defined purpose
 2. **Dependency injection** - Dependencies passed as parameters for testability
 3. **Config-driven** - All settings managed through files
-4. **Concurrency safety** - `atomic.Value` ensures thread safety
+4. **Concurrency safety** - `sync.RWMutex` protects proxy configuration and routing state
 5. **Error handling** - Comprehensive logging and error propagation
 
 ### Performance Optimizations

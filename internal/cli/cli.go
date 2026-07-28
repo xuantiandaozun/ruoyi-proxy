@@ -29,6 +29,7 @@ type CLI struct {
 	running           bool
 	proxyPID          int    // 保存代理进程的PID
 	currentService    string // 当前操作的服务ID
+	selectedSpoke     string // Hub 当前选中的远程节点
 	agentCancel       func() // Agent 取消函数，用于 Ctrl+C 中断 ReAct 循环
 	spokeWorkerCancel func() // Spoke 远程控制轮询取消函数
 	schedulerCancel   func() // 本机 AI 定时任务调度器取消函数
@@ -99,9 +100,14 @@ func (c *CLI) Start() {
 		readline.PcItem("hub-disable"),
 		readline.PcItem("hub-token"),
 		readline.PcItem("hub-status"),
+		readline.PcItem("hub-select"),
 		readline.PcItem("hub-spoke"),
+		readline.PcItem("hub-node-set"),
 		readline.PcItem("hub-exec"),
+		readline.PcItem("hub-action"),
 		readline.PcItem("hub-jobs"),
+		readline.PcItem("hub-cancel"),
+		readline.PcItem("hub-retry"),
 		readline.PcItem("hub-revoke"),
 		readline.PcItem("spoke-agent-install"),
 		readline.PcItem("spoke-agent-status"),
@@ -133,9 +139,14 @@ func (c *CLI) Start() {
 		readline.PcItem("/agent-config"),
 		readline.PcItem("/hub-token"),
 		readline.PcItem("/hub-status"),
+		readline.PcItem("/hub-select"),
 		readline.PcItem("/hub-spoke"),
+		readline.PcItem("/hub-node-set"),
 		readline.PcItem("/hub-exec"),
+		readline.PcItem("/hub-action"),
 		readline.PcItem("/hub-jobs"),
+		readline.PcItem("/hub-cancel"),
+		readline.PcItem("/hub-retry"),
 		readline.PcItem("/hub-enable"),
 		readline.PcItem("/hub-disable"),
 		readline.PcItem("/hub-revoke"),
@@ -238,7 +249,11 @@ func (c *CLI) setMainPrompt() {
 	if c.rl == nil {
 		return
 	}
-	c.rl.SetPrompt(fmt.Sprintf("\033[1;36mruoyi[%s]>\033[0m ", c.currentService))
+	promptTarget := c.currentService
+	if c.selectedSpoke != "" {
+		promptTarget += "@" + c.selectedSpoke
+	}
+	c.rl.SetPrompt(fmt.Sprintf("\033[1;36mruoyi[%s]>\033[0m ", promptTarget))
 }
 
 func (c *CLI) selectSimpleMenu(title string, options []string, selected int) (int, bool) {
@@ -472,6 +487,9 @@ func (c *CLI) printBanner() {
 `
 	fmt.Println("\033[1;34m" + banner + "\033[0m")
 	fmt.Printf("当前服务: \033[1;32m%s\033[0m\n", c.currentService)
+	if c.selectedSpoke != "" {
+		fmt.Printf("当前 Spoke: \033[1;36m%s\033[0m\n", c.selectedSpoke)
+	}
 	if buildinfo.Profile != "default" {
 		fmt.Printf("构建角色: \033[1;36m%s\033[0m\n", buildinfo.ProfileLabel())
 	}
@@ -512,8 +530,12 @@ func (c *CLI) printHelp() {
 	fmt.Println("  \033[1;33mAI 与 Hub:\033[0m")
 	fmt.Println("    /agent-config   - 配置 AI 提供商")
 	fmt.Println("    /hub-enable     /hub-disable  - Hub 网关开关（需重启代理）")
-	fmt.Println("    /hub-token      /hub-status [id]   /hub-spoke <id>   /hub-revoke <id>")
+	fmt.Println("    /hub-token      /hub-status [id]   /hub-select [id|clear]")
+	fmt.Println("    /hub-spoke [id] /hub-revoke <id>")
+	fmt.Println("    /hub-node-set <id> <key=value...>  - 节点治理配置")
 	fmt.Println("    /hub-exec <id> <命令>              /hub-jobs [id]")
+	fmt.Println("    /hub-action <id[,id]|@组> <动作> [参数]")
+	fmt.Println("    /hub-cancel <job-id>               /hub-retry <job-id>")
 	fmt.Println("    /spoke-agent-install               /spoke-agent-status")
 	fmt.Println()
 	fmt.Println("  \033[1;33m远程数据库:\033[0m")
@@ -766,22 +788,39 @@ func (c *CLI) handleCommand(input string) {
 		}
 		c.handleHubStatus()
 
+	case "hub-select":
+		c.handleHubSelect(args)
+
 	case "hub-spoke":
-		if len(args) == 0 {
-			c.printError("请指定 spoke ID，例如: hub-spoke spoke-abc12345")
+		spokeID := c.selectedSpoke
+		if len(args) > 0 {
+			spokeID = args[0]
+		}
+		if spokeID == "" {
+			c.printError("请指定 spoke ID，或先使用 /hub-select")
 			return
 		}
-		c.handleHubSpoke(args[0])
+		c.handleHubSpoke(spokeID)
+	case "hub-node-set":
+		c.handleHubNodeSet(args)
 
 	case "hub-exec":
 		c.handleHubExec(args)
 
+	case "hub-action":
+		c.handleHubAction(args)
+
 	case "hub-jobs":
-		spokeID := ""
+		spokeID := c.selectedSpoke
 		if len(args) > 0 {
 			spokeID = args[0]
 		}
 		c.handleHubJobs(spokeID)
+	case "hub-cancel":
+		c.handleHubJobMutation("cancel", args)
+
+	case "hub-retry":
+		c.handleHubJobMutation("retry", args)
 
 	case "hub-revoke":
 		if len(args) == 0 {
@@ -1462,16 +1501,6 @@ func (c *CLI) handleExistingConfig(configPath string) {
 		}
 		if active, ok := proxy["active_env"].(string); ok {
 			fmt.Printf("  活跃环境: \033[1;32m%s\033[0m\n", active)
-		}
-	}
-
-	if sync, ok := config["sync"].(map[string]interface{}); ok {
-		if enabled, ok := sync["enabled"].(bool); ok {
-			status := "未启用"
-			if enabled {
-				status = "已启用"
-			}
-			fmt.Printf("  文件同步: %s\n", status)
 		}
 	}
 

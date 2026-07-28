@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -21,12 +22,19 @@ type pendingTokenRecord struct {
 
 // SpokeRecord 已注册 spoke 节点
 type SpokeRecord struct {
-	ID        string        `json:"id"`
-	TokenHash string        `json:"token_hash"`
-	CreatedAt time.Time     `json:"created_at"`
-	LastSeen  time.Time     `json:"last_seen"`
-	Revoked   bool          `json:"revoked"`
-	Profile   *SpokeProfile `json:"profile,omitempty"`
+	ID                  string        `json:"id"`
+	TokenHash           string        `json:"token_hash"`
+	CreatedAt           time.Time     `json:"created_at"`
+	LastSeen            time.Time     `json:"last_seen"`
+	Revoked             bool          `json:"revoked"`
+	Alias               string        `json:"alias,omitempty"`
+	Tags                []string      `json:"tags,omitempty"`
+	Group               string        `json:"group,omitempty"`
+	Environment         string        `json:"environment,omitempty"`
+	Owner               string        `json:"owner,omitempty"`
+	Maintenance         bool          `json:"maintenance,omitempty"`
+	AllowedCapabilities []string      `json:"allowed_capabilities,omitempty"`
+	Profile             *SpokeProfile `json:"profile,omitempty"`
 }
 
 type spokeStore struct {
@@ -228,8 +236,9 @@ func ListSpokes() []SpokeRecord {
 	defer defaultStore.mu.RUnlock()
 	out := make([]SpokeRecord, 0, len(defaultStore.spokes))
 	for _, rec := range defaultStore.spokes {
-		out = append(out, *rec)
+		out = append(out, cloneSpokeRecord(rec))
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -241,7 +250,7 @@ func GetSpoke(spokeID string) (SpokeRecord, bool) {
 	if !ok {
 		return SpokeRecord{}, false
 	}
-	return *rec, true
+	return cloneSpokeRecord(rec), true
 }
 
 // UpdateSpokeProfile 更新 spoke 节点档案（Hub 集中管理）

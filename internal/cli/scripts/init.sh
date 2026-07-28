@@ -368,58 +368,6 @@ configure_app() {
         fi
     fi
     
-    # 文件同步配置
-    echo -e "\n${CYAN}文件同步配置${NC}"
-    echo -e "${YELLOW}是否启用文件同步? (y/n):${NC} "
-    read -r enable_sync
-    
-    SYNC_ENABLED="false"
-    SERVER_ROLE="master"
-    SLAVE_HOST="http://192.168.1.10:8002"
-    SYNC_PASSWORD="change-me-please"
-    VUE_SOURCE="./vue/dist"
-    
-    if [[ "$enable_sync" =~ ^[Yy]$ ]]; then
-        SYNC_ENABLED="true"
-        
-        echo -e "\n${CYAN}选择服务器角色:${NC}"
-        echo -e "  1. master - 主服务器（推送文件）"
-        echo -e "  2. slave  - 从服务器（接收文件）"
-        echo -e "${YELLOW}请选择 (1/2):${NC} "
-        read -r role_choice
-        
-        if [[ "$role_choice" == "1" ]]; then
-            SERVER_ROLE="master"
-            
-            echo -e "${YELLOW}从服务器地址 (例: http://192.168.1.20:8002):${NC} "
-            read -r slave_host_input
-            if [ -n "$slave_host_input" ]; then
-                SLAVE_HOST="$slave_host_input"
-            fi
-            
-            echo -e "${YELLOW}同步密码:${NC} "
-            read -r sync_pass_input
-            if [ -n "$sync_pass_input" ]; then
-                SYNC_PASSWORD="$sync_pass_input"
-            fi
-            
-            echo -e "${YELLOW}是否同步Vue文件? (y/n):${NC} "
-            read -r sync_vue
-            if [[ ! "$sync_vue" =~ ^[Yy]$ ]]; then
-                VUE_SOURCE=""
-            fi
-            
-        elif [[ "$role_choice" == "2" ]]; then
-            SERVER_ROLE="slave"
-            
-            echo -e "${YELLOW}同步密码（需与主服务器一致）:${NC} "
-            read -r sync_pass_input
-            if [ -n "$sync_pass_input" ]; then
-                SYNC_PASSWORD="$sync_pass_input"
-            fi
-        fi
-    fi
-    
     # 生成统一配置文件
     cat > "$APP_CONFIG" <<EOF
 {
@@ -430,18 +378,6 @@ configure_app() {
     "green_target": "http://127.0.0.1:8081",
     "active_env": "blue",
     "proxy_port": "8000"
-  },
-  "sync": {
-    "enabled": $SYNC_ENABLED,
-    "server_role": "$SERVER_ROLE",
-    "slave_host": "$SLAVE_HOST",
-    "slave_password": "$SYNC_PASSWORD",
-    "jar_source_path": "./ruoyi-*.jar",
-    "vue_source_path": "$VUE_SOURCE",
-    "remote_jar_path": "./ruoyi-*.jar",
-    "remote_vue_path": "./vue/dist",
-    "remote_restart_script": "./scripts/service.sh restart",
-    "vue_sync_interval": 300
   },
   "ssl": {
     "email": "$SSL_EMAIL",
@@ -454,22 +390,6 @@ configure_app() {
     "html_path": "/etc/nginx/html",
     "vue_path": "/etc/nginx/html/admin"
   }
-}
-EOF
-    
-    # 同时生成兼容的旧配置文件
-    cat > "$CURRENT_DIR/configs/sync_config.json" <<EOF
-{
-  "enabled": $SYNC_ENABLED,
-  "server_role": "$SERVER_ROLE",
-  "slave_host": "$SLAVE_HOST",
-  "slave_password": "$SYNC_PASSWORD",
-  "jar_source_path": "./ruoyi-*.jar",
-  "vue_source_path": "$VUE_SOURCE",
-  "remote_jar_path": "./ruoyi-*.jar",
-  "remote_vue_path": "./vue/dist",
-  "remote_restart_script": "./scripts/service.sh restart",
-  "vue_sync_interval": 300
 }
 EOF
     
@@ -559,5 +479,4 @@ fi
 echo -e "\n${CYAN}提示:${NC}"
 echo -e "  - JAR文件请放在: ${BLUE}$CURRENT_DIR${NC}"
 echo -e "  - 使用CLI管理: ${BLUE}$PROXY_BIN cli${NC}"
-echo -e "  - 修改同步配置: ${BLUE}$PROXY_BIN cli${NC} 然后执行 ${BLUE}sync-config${NC}"
 echo ""
