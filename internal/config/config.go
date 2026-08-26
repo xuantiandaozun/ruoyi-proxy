@@ -74,8 +74,6 @@ func LoadConfig() (*Config, error) {
 	if data, err := os.ReadFile(ConfigFile); err == nil {
 		if err := json.Unmarshal(data, config); err != nil {
 			log.Printf("解析配置文件失败: %v, 使用默认配置", err)
-		} else {
-			log.Printf("配置文件加载成功: %s, 服务数量: %d", ConfigFile, len(config.Services))
 		}
 	} else {
 		log.Printf("配置文件不存在，创建默认配置: %s", ConfigFile)

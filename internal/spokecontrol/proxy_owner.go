@@ -2,6 +2,7 @@ package spokecontrol
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -16,8 +17,19 @@ func RunProxyOwned(ctx context.Context, logf func(format string, args ...interfa
 	for {
 		worker, err := NewFromLocalConfig(logf)
 		if err == nil {
-			logf("代理进程已接管 Spoke 远程控制")
-			return worker.Run(ctx)
+			lease, leaseErr := AcquireControlLease()
+			switch {
+			case leaseErr == nil:
+				logf("代理进程已接管 Spoke 远程控制")
+				defer func() {
+					if closeErr := lease.Close(); closeErr != nil {
+						logf("释放 Spoke 远程控制所有权失败: %v", closeErr)
+					}
+				}()
+				return worker.Run(ctx)
+			case !errors.Is(leaseErr, ErrControlAlreadyOwned):
+				return leaseErr
+			}
 		}
 		select {
 		case <-ctx.Done():

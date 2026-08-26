@@ -2,6 +2,7 @@ package spokecontrol
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -68,6 +69,13 @@ func RunStandalone(ctx context.Context, logf func(format string, args ...interfa
 			logf("代理进程已接管远程控制，独立 spoke-agent 进入待机")
 			proxyOwned = true
 		case !proxyRunning && workerCancel == nil:
+			lease, leaseErr := AcquireControlLease()
+			if errors.Is(leaseErr, ErrControlAlreadyOwned) {
+				break
+			}
+			if leaseErr != nil {
+				return leaseErr
+			}
 			workerCtx, cancel := context.WithCancel(ctx)
 			done := make(chan error, 1)
 			workerCancel = cancel
@@ -75,6 +83,11 @@ func RunStandalone(ctx context.Context, logf func(format string, args ...interfa
 			proxyOwned = false
 			logf("未检测到代理进程，独立 spoke-agent 接管远程控制")
 			go func() {
+				defer func() {
+					if err := lease.Close(); err != nil {
+						logf("释放 Spoke 远程控制所有权失败: %v", err)
+					}
+				}()
 				done <- worker.Run(workerCtx)
 			}()
 		}

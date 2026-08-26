@@ -33,6 +33,7 @@ configs/hub_spokes.json
 configs/hub_pending_token.json
 configs/hub_jobs.json
 configs/spoke_profile.json
+configs/spoke_control.lock
 configs/database_profiles.json
 configs/database_secrets.json
 configs/scheduler.db

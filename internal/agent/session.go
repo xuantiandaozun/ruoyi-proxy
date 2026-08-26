@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -171,9 +172,13 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 		}
 		return nil, err
 	}
+	// 异常中断可能遗留空索引，按无历史会话处理，避免 CLI 无法启动。
+	if len(bytes.TrimSpace(data)) == 0 {
+		return []SessionMeta{}, nil
+	}
 	var items []SessionMeta
 	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析会话索引失败: %v", err)
 	}
 	s.sortSessions(items)
 	return items, nil
@@ -228,7 +233,36 @@ func (s *SessionStore) saveIndex(items []SessionMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.indexPath, data, 0644)
+	return writeFileAtomic(s.indexPath, data, 0644)
+}
+
+// writeFileAtomic 在同目录写入临时文件后原子替换，避免正式文件被截断为空。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("创建会话索引临时文件失败: %v", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		return fmt.Errorf("设置会话索引权限失败: %v", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("写入会话索引临时文件失败: %v", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("同步会话索引临时文件失败: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭会话索引临时文件失败: %v", err)
+	}
+	if err := replaceFile(tmpPath, path); err != nil {
+		return fmt.Errorf("替换会话索引失败: %v", err)
+	}
+	return nil
 }
 
 func (s *SessionStore) sortSessions(items []SessionMeta) {

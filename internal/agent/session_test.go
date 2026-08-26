@@ -1,9 +1,47 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestSessionStoreTreatsEmptyIndexAsNoSessions(t *testing.T) {
+	dir := t.TempDir()
+	store := &SessionStore{rootDir: dir, indexPath: filepath.Join(dir, "index.json")}
+	if err := os.WriteFile(store.indexPath, []byte(" \n\t"), 0644); err != nil {
+		t.Fatalf("写入空索引失败: %v", err)
+	}
+
+	items, err := store.ListSessions()
+	if err != nil {
+		t.Fatalf("空索引应当可容错: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("空索引返回 %d 个会话，期望 0", len(items))
+	}
+}
+
+func TestSessionStoreAtomicallyReplacesIndex(t *testing.T) {
+	dir := t.TempDir()
+	store := &SessionStore{rootDir: dir, indexPath: filepath.Join(dir, "index.json")}
+	if err := os.WriteFile(store.indexPath, []byte("[]"), 0644); err != nil {
+		t.Fatalf("写入初始索引失败: %v", err)
+	}
+	items := []SessionMeta{{ID: "20260824-173014", Title: "测试会话"}}
+
+	if err := store.saveIndex(items); err != nil {
+		t.Fatalf("原子替换索引失败: %v", err)
+	}
+	loaded, err := store.ListSessions()
+	if err != nil {
+		t.Fatalf("读取替换后的索引失败: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ID != items[0].ID {
+		t.Fatalf("替换后的索引不正确: %#v", loaded)
+	}
+}
 
 func TestVisibleSessionMessagesExcludeInternalLayers(t *testing.T) {
 	messages := []Message{
